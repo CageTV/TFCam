@@ -6,7 +6,6 @@
 #include "CellEntryCam.h"
 #include "SceneCam.h"
 #include "AmbientCam.h"
-#include "AmbientCam.h"
 
 #include <spdlog/sinks/basic_file_sink.h>
 #include <ShlObj.h>
@@ -16,7 +15,12 @@
 #include <format>
 
 namespace {
+    // 0.13.1: SKSE's own log folder first - it follows the running game (Skyrim Special Edition, GOG, VR). The fixed
+    // 'Skyrim Special Edition' folder below is only the fallback, and what 0.13.0 and older always used.
     std::filesystem::path ResolveLogDirectory() {
+        if (const auto skseDir = SKSE::log::log_directory(); skseDir && !skseDir->empty()) {
+            return *skseDir;
+        }
         wchar_t* docs = nullptr;
         std::filesystem::path p;
         if (SUCCEEDED(::SHGetKnownFolderPath(FOLDERID_Documents, KF_FLAG_DEFAULT, nullptr, &docs))) {

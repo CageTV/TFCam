@@ -104,10 +104,19 @@ Files (TFCam writes both; neither is ever shipped, so with MO2 they appear in `o
   `pose:<animation event>`. Lines TFCam cannot read (or with a value that is not a finite number) are kept as they
   are and not used; a shot's FOV is held inside TFCam's FOV limits.
 
-What it does is logged to `Documents/My Games/Skyrim Special Edition/SKSE/TFCam.log` (mode changes, stage changes with
+What it does is logged to `TFCam.log` in SKSE's log folder (`Documents/My Games/Skyrim Special Edition/SKSE/` on Special Edition / Anniversary Edition) (mode changes, stage changes with
 the scene / stage ids, shots saved / recalled / deleted, refusals, automatic free camera waits and drops).
 
 ## Changelog
+
+**0.13.1** (fork by CageTV)
+- A TFCam.ini with values outside what the menu allows (or text that is not a number) no longer reaches the camera: speed, FOV step,
+  FOV limits, roll speed, light radius / fade / colour, the click actions and the cell-entry camera values are brought back inside the
+  slider ranges at load, and the change is logged. A FOV minimum above the maximum no longer feeds `std::clamp` (undefined behaviour);
+  both limits go back to 10 / 150 then.
+- `TFCam.log` goes to SKSE's own log folder, so on Skyrim VR and the GOG edition it is next to the other SKSE logs instead of
+  in a "Skyrim Special Edition" folder that does not exist there. Special Edition and Anniversary Edition are unchanged.
+- `build_tfcam.bat` also finds Visual Studio 18 (and asks for its 14.44 toolset, as BUILD.md pins); `NOTICE.txt` added.
 
 **0.13.0**
 - Scene Camera API v3 (`RequestTFCamAPI(3)`, `ITFCam3`): orbit aim, sway and target, the automatic free camera switch,
@@ -118,3 +127,6 @@ the scene / stage ids, shots saved / recalled / deleted, refusals, automatic fre
 - Automatic free camera for saved shots (`bAutoEnterShots`, on by default; see above).
 - Stage keys are checked with `SexLabRegistry.StageExists` before they count (fixes a stage key that paired a new scene
   with the previous scene's stage for about a second).
+
+## License
+GPL-3.0, as the original TFCam by StinkyPumpkin (`LICENSE`, unchanged). `NOTICE.txt` has the copyright statements of the original and of this fork, the GPL notice and the source links. TFCam.dll links alandtse's CommonLibSSE-NG (GPL-3.0 with a modding exception).

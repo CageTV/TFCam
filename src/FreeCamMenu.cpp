@@ -14,8 +14,10 @@
 #include "SKSEMenuFramework.h"
 
 #include <Windows.h>
+#include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <format>
 #include <fstream>
@@ -1125,6 +1127,50 @@ namespace FreeCamMenu {
             CamCollision::Clamp();
             SKSE::log::info("CamCollision: walls {} for the automatic cameras - margin {:.0f}, ease out {:.1f} s, ray layer {}",
                 c.enabled ? "on" : "off", c.margin, c.returnSec, c.layer);
+        }
+
+        // 0.13.1: a hand-edited TFCam.ini could hold values the menu sliders never allow (or text that is not a number).
+        // std::clamp with fMin > fMax is undefined, so the FOV limits are fixed first. Ranges are the sliders' ranges.
+        {
+            auto range = [](float& v, float lo, float hi, float def) {
+                const float before = v;
+                v = std::isfinite(v) ? std::clamp(v, lo, hi) : def;
+                return v != before;
+            };
+            bool fixed = false;
+            fixed |= range(fovMin, 1.0f, 170.0f, 10.0f);
+            fixed |= range(fovMax, 2.0f, 179.0f, 150.0f);
+            if (fovMin >= fovMax) {
+                fovMin = 10.0f;
+                fovMax = 150.0f;
+                fixed  = true;
+            }
+            s_fovMin = fovMin;
+            s_fovMax = fovMax;
+            fixed |= range(s_cameraSpeed, 0.5f, 50.0f, 14.5f);
+            fixed |= range(s_fovStep, 0.5f, 10.0f, 5.0f);
+            fixed |= range(s_rollSpeed, 0.1f, 5.0f, 1.6f);
+            fixed |= range(s_lightRadius, 100.0f, 5000.0f, 1000.0f);
+            fixed |= range(s_lightFade, 0.1f, 10.0f, 1.7f);
+            const int r0 = s_lightColorR, g0 = s_lightColorG, b0 = s_lightColorB;
+            s_lightColorR = std::clamp(s_lightColorR, 0, 255);
+            s_lightColorG = std::clamp(s_lightColorG, 0, 255);
+            s_lightColorB = std::clamp(s_lightColorB, 0, 255);
+            fixed |= (r0 != s_lightColorR || g0 != s_lightColorG || b0 != s_lightColorB);
+            s_lmbAction = std::clamp(s_lmbAction, 0, 10);  // the Combo has 11 entries
+            s_rmbAction = std::clamp(s_rmbAction, 0, 10);
+
+            auto& ce = CellEntryCam::GetSettings();
+            const CellEntryCam::Settings ced{};
+            fixed |= range(ce.zoom, -0.2f, 1.0f, ced.zoom);
+            fixed |= range(ce.zoomSpeed, 0.1f, 5.0f, ced.zoomSpeed);
+            fixed |= range(ce.rotation, 0.0f, 360.0f, ced.rotation);
+            fixed |= range(ce.rotationSpeed, 10.0f, 360.0f, ced.rotationSpeed);
+            fixed |= range(ce.startDelay, 0.0f, 3.0f, ced.startDelay);
+            if (fixed) {
+                SKSE::log::warn("FreeCamMenu: some values in {} were outside the range the menu allows (or not a number) "
+                                "and were brought back inside it", ini);
+            }
         }
 
         CameraLight::SetScrollBrightness(s_lightScrollBrightness);
