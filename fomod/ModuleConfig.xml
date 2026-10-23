@@ -1,0 +1,93 @@
+<?xml version="1.0" encoding="utf-8"?>
+<config xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="http://qconsulting.ca/fo3/ModConfig5.0.xsd">
+  <moduleName>TFCam</moduleName>
+
+  <requiredInstallFiles>
+    <file source="LICENSE.txt" destination="LICENSE.txt" />
+    <file source="NOTICE.txt" destination="NOTICE.txt" />
+  </requiredInstallFiles>
+
+  <installSteps order="Explicit">
+    <installStep name="Skyrim Version">
+      <optionalFileGroups order="Explicit">
+        <group name="TFCam.dll for your game" type="SelectExactlyOne">
+          <plugins order="Explicit">
+
+            <plugin name="Skyrim Anniversary Edition (1.6.x and 1.7.x)">
+              <description>The build for Skyrim Special Edition / Anniversary Edition 1.6.318 and newer, including 1.6.1170 and 1.7.99 / 1.7.104. Needs SKSE, the Address Library for your game version and SKSE Menu Framework.
+
+Chosen for you when the installer sees a 1.6.x or 1.7.x game.</description>
+              <files>
+                <folder source="TFCam AE" destination="" />
+              </files>
+              <typeDescriptor>
+                <dependencyType>
+                  <defaultType name="Optional" />
+                  <patterns>
+                    <pattern>
+                      <dependencies>
+                        <gameDependency version="1.6.0.0" />
+                      </dependencies>
+                      <type name="Recommended" />
+                    </pattern>
+                  </patterns>
+                </dependencyType>
+              </typeDescriptor>
+            </plugin>
+
+            <plugin name="Skyrim Special Edition (1.5.97)">
+              <description>The build for the old Skyrim Special Edition 1.5.97 (SKSE 2.0.20). Needs SKSE, the Address Library for 1.5.97 and SKSE Menu Framework.
+
+Chosen for you when the installer sees a 1.5.x game.</description>
+              <files>
+                <folder source="TFCam SE" destination="" />
+              </files>
+              <typeDescriptor>
+                <dependencyType>
+                  <defaultType name="Optional" />
+                  <patterns>
+                    <pattern>
+                      <dependencies>
+                        <gameDependency version="1.6.0.0" />
+                      </dependencies>
+                      <type name="Optional" />
+                    </pattern>
+                    <pattern>
+                      <dependencies>
+                        <gameDependency version="1.5.0.0" />
+                      </dependencies>
+                      <type name="Recommended" />
+                    </pattern>
+                  </patterns>
+                </dependencyType>
+              </typeDescriptor>
+            </plugin>
+
+            <plugin name="All versions in one DLL (Skyrim VR, or if unsure)">
+              <description>One TFCam.dll for Skyrim SE 1.5.97, AE 1.6.x and 1.7.x and Skyrim VR 1.4.x, the same build TFCam shipped before 0.14.1. It is the one for Skyrim VR (needs SKSE VR, the Address Library for VR and SKSE Menu Framework VR). The VR support is the original author's and has not been tested by the fork.
+
+Chosen for you when the installer sees a VR game or cannot tell which game version you have; the two options above are the same code built for one game version only.</description>
+              <files>
+                <folder source="TFCam ALL" destination="" />
+              </files>
+              <typeDescriptor>
+                <dependencyType>
+                  <defaultType name="Recommended" />
+                  <patterns>
+                    <pattern>
+                      <dependencies>
+                        <gameDependency version="1.5.0.0" />
+                      </dependencies>
+                      <type name="Optional" />
+                    </pattern>
+                  </patterns>
+                </dependencyType>
+              </typeDescriptor>
+            </plugin>
+
+          </plugins>
+        </group>
+      </optionalFileGroups>
+    </installStep>
+  </installSteps>
+</config>

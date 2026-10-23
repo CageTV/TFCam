@@ -92,6 +92,14 @@ namespace {
         return false;
     }
 
+    // 0.14.1: does this DLL's runtime variant (TFCAM_RUNTIME_NAME) fit the running game? ALL fits every one.
+    bool RuntimeMatchesBuild(const REL::Version& a_runtime) {
+        const std::string_view build = TFCAM_RUNTIME_NAME;
+        if (build == "ALL") return true;
+        if (build == "SE") return a_runtime.minor() == 5;   // Skyrim SE 1.5.97
+        return a_runtime.minor() >= 6;                      // AE: 1.6.x and 1.7.x
+    }
+
     void MessageHandler(SKSE::MessagingInterface::Message* a_msg) {
         switch (a_msg->type) {
         case SKSE::MessagingInterface::kPostLoad:
@@ -151,7 +159,22 @@ SKSEPluginLoad(const SKSE::LoadInterface* skse) {
     InitializeLogging();
 
     SKSE::log::info("TFCam v{} loaded", TFCAM_VERSION);
-    SKSE::log::info("built on CommonLibSSE-NG {}", TFCAM_COMMONLIB_VERSION);
+    SKSE::log::info("built on CommonLibSSE-NG {}, runtime variant {}", TFCAM_COMMONLIB_VERSION, TFCAM_RUNTIME_NAME);
+
+    // 0.14.1: the installer ships one DLL per runtime (SE 1.5.97, AE 1.6.x / 1.7.x) next to the all-in-one
+    // one. A variant built for another runtime would call the wrong game addresses, so it stays out instead.
+    if (!RuntimeMatchesBuild(skse->RuntimeVersion())) {
+        const auto v = skse->RuntimeVersion();
+        SKSE::log::error("This TFCam.dll is the {} build but the game is {}.{}.{}.{} - TFCam disabled. Install the matching "
+                         "option of the TFCam installer (or the 'all versions' one).",
+            TFCAM_RUNTIME_NAME, v.major(), v.minor(), v.patch(), v.build());
+        ::MessageBoxA(nullptr,
+            "TFCam: this TFCam.dll was built for a different Skyrim version than the one running, so it has been "
+            "disabled.\n\nReinstall TFCam and pick the option that matches your game (or 'All versions').\n\n"
+            "The game will continue to run normally.",
+            "TFCam", MB_OK | MB_ICONWARNING);
+        return true;  // loaded but inert: SKSE keeps going and TFCam registers nothing
+    }
 
     // 0.7.9: SKSEPluginLoad runs on the game's main thread (kDataLoaded runs on the data-loading thread), so this
     // is where the diagnostics learn which thread is "main".

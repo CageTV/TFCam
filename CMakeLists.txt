@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.21)
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>" CACHE STRING "")
-project(TFCam VERSION 0.14.0 LANGUAGES CXX)
+project(TFCam VERSION 0.14.1 LANGUAGES CXX)
 
 if(DEFINED ENV{SKYRIM_MODS_FOLDER} AND IS_DIRECTORY "$ENV{SKYRIM_MODS_FOLDER}")
     set(OUTPUT_FOLDER "$ENV{SKYRIM_MODS_FOLDER}/FreeCam--Claude")
@@ -13,7 +13,8 @@ set(CLIB_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/extern/CommonLibSSE-NG")
 if(NOT EXISTS "${CLIB_SOURCE_DIR}/cmake/CommonLibSSE.cmake")
     message(FATAL_ERROR "extern/CommonLibSSE-NG is empty. Run: git submodule update --init --recursive --depth 1")
 endif()
-if(NOT EXISTS "${CLIB_SOURCE_DIR}/extern/openvr/lib/win64/openvr_api.lib")
+if((NOT TFCAM_RUNTIME OR TFCAM_RUNTIME STREQUAL "ALL") AND
+   NOT EXISTS "${CLIB_SOURCE_DIR}/extern/openvr/lib/win64/openvr_api.lib")
     message(FATAL_ERROR "extern/CommonLibSSE-NG/extern/openvr is empty (VR is enabled). Run: git submodule update --init --recursive --depth 1")
 endif()
 
@@ -22,10 +23,33 @@ set(BUILD_TESTS OFF CACHE BOOL "" FORCE)                 # NG defaults ON -> fin
 set(SKSE_SUPPORT_XBYAK OFF CACHE BOOL "" FORCE)          # TFCam uses no trampoline
 set(SKSE_SUPPORT_PATCH_SAFETY OFF CACHE BOOL "" FORCE)   # write_branch diagnostics; TFCam has no write_branch, and ON
                                                          # FetchContent-downloads minhook at configure time
-# Same runtime set as the 0.7.x DLL (the old vcpkg port built SE+AE+VR): one DLL, runtime dispatch.
-set(ENABLE_SKYRIM_SE ON CACHE BOOL "" FORCE)
-set(ENABLE_SKYRIM_AE ON CACHE BOOL "" FORCE)             # AE = 1.6.x AND 1.7.x (NG classifies minor >= 6 as AE)
-set(ENABLE_SKYRIM_VR ON CACHE BOOL "" FORCE)
+# TFCAM_RUNTIME picks which game runtimes the DLL is built for (0.14.1):
+#   ALL (default) = SE + AE + VR in one DLL, the same as the 0.7.x - 0.14.0 builds (runtime dispatch)
+#   SE = Skyrim SE 1.5.97 only, AE = Skyrim AE 1.6.x and 1.7.x only
+# A VR-only build is not offered: FreeCamController.cpp pins the SE / AE field offsets of RE::FreeCameraState and the AE 1.7
+# virtual-slot shift, and both static_asserts fail against the VR layout. VR stays in the ALL build, as before.
+# The release installer ships ALL, SE and AE; see BUILD.md "Runtime variants". Configure each in its own build folder.
+set(TFCAM_RUNTIME "ALL" CACHE STRING "Game runtimes to build for: ALL, SE or AE")
+set_property(CACHE TFCAM_RUNTIME PROPERTY STRINGS ALL SE AE)
+if(NOT TFCAM_RUNTIME MATCHES "^(ALL|SE|AE)$")
+    message(FATAL_ERROR "TFCAM_RUNTIME must be ALL, SE or AE (got '${TFCAM_RUNTIME}')")
+endif()
+set(_rt_se OFF)
+set(_rt_ae OFF)
+set(_rt_vr OFF)
+if(TFCAM_RUNTIME STREQUAL "ALL" OR TFCAM_RUNTIME STREQUAL "SE")
+    set(_rt_se ON)
+endif()
+if(TFCAM_RUNTIME STREQUAL "ALL" OR TFCAM_RUNTIME STREQUAL "AE")
+    set(_rt_ae ON)  # AE = 1.6.x AND 1.7.x (NG classifies minor >= 6 as AE)
+endif()
+if(TFCAM_RUNTIME STREQUAL "ALL")
+    set(_rt_vr ON)
+endif()
+set(ENABLE_SKYRIM_SE ${_rt_se} CACHE BOOL "" FORCE)
+set(ENABLE_SKYRIM_AE ${_rt_ae} CACHE BOOL "" FORCE)
+set(ENABLE_SKYRIM_VR ${_rt_vr} CACHE BOOL "" FORCE)
+message(STATUS "TFCam runtimes: ${TFCAM_RUNTIME} (SE ${_rt_se}, AE ${_rt_ae}, VR ${_rt_vr})")
 set(REX_OPTION_INI OFF CACHE BOOL "" FORCE)
 set(REX_OPTION_JSON OFF CACHE BOOL "" FORCE)
 set(REX_OPTION_TOML OFF CACHE BOOL "" FORCE)
@@ -67,6 +91,7 @@ target_precompile_headers(${PROJECT_NAME} PRIVATE PCH.h)
 target_compile_definitions(${PROJECT_NAME} PRIVATE
     TFCAM_VERSION="${PROJECT_VERSION}"
     TFCAM_COMMONLIB_VERSION="${TFCAM_CLIB_VERSION}"
+    TFCAM_RUNTIME_NAME="${TFCAM_RUNTIME}"
 )
 
 target_include_directories(${PROJECT_NAME} PRIVATE

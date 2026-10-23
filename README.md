@@ -109,6 +109,13 @@ the scene / stage ids, shots saved / recalled / deleted, refusals, automatic fre
 
 ## Changelog
 
+**0.14.1** (fork by CageTV)
+- The download is now an installer (FOMOD) with one `TFCam.dll` per game version: **AE 1.6.x / 1.7.x**, **SE 1.5.97**, and **All versions**
+  (SE + AE + VR in one DLL, the build of 0.14.0 and older; it is the one for Skyrim VR). The installer picks the matching one from your game's
+  version, so pressing Next installs the right one. The SE and AE DLLs are the same code built for one runtime only (`TFCAM_RUNTIME=SE|AE`,
+  see `BUILD.md`); a DLL that finds itself on another runtime stays inert, logs it and shows a message instead of calling wrong addresses.
+- `package_release.py` builds the installer zip from the three builds; the `fomod/` folder is its source.
+
 **0.14.0** (fork by CageTV)
 - *Smooth FOV changes* (`[FOV] bSmooth`, default on, `fSmoothTime` 0.12 s): the mouse wheel and the FOV in / out click actions ease the FOV toward
   a target instead of jumping, and scrolling fast adds up on the target. The easing is frame-rate independent, also runs with time frozen,

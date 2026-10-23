@@ -20,12 +20,17 @@ if not exist extern\CommonLibSSE-NG\cmake\CommonLibSSE.cmake (
     echo === extern\CommonLibSSE-NG missing: git submodule update --init --recursive --depth 1 ===
     exit /b 1
 )
-if not exist build\ng\release\build.ninja (
-    echo === CONFIGURING ===
-    cmake --preset release
+REM 0.14.1: optional first argument = runtime variant: ALL (default, build\ng\release), SE, AE or VR (build\ng\release-se ...).
+set "VARIANT=%~1"
+if "%VARIANT%"=="" set "VARIANT=ALL"
+set "BDIR=build\ng\release"
+if /i not "%VARIANT%"=="ALL" set "BDIR=build\ng\release-%VARIANT%"
+if not exist %BDIR%\build.ninja (
+    echo === CONFIGURING %VARIANT% ===
+    cmake --preset release -B %BDIR% -DTFCAM_RUNTIME=%VARIANT%
     if errorlevel 1 ( echo === CONFIGURE FAILED === & exit /b 1 )
 )
-echo === BUILDING ===
-cmake --build build\ng\release
+echo === BUILDING %VARIANT% ===
+cmake --build %BDIR%
 if errorlevel 1 ( echo === BUILD FAILED === & exit /b 1 )
-echo === BUILD SUCCEEDED ===
+echo === BUILD SUCCEEDED (%VARIANT%: %BDIR%\TFCam.dll) ===
