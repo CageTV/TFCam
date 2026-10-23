@@ -32,7 +32,10 @@ Shift+Scroll Up to turn on a light attached to the camera. Keep scrolling to inc
 Shift+Middle Mouse Button freezes/unfreezes game time while in free camera. Everything stops — NPCs, particles, weather — while you fly around freely. Time restores automatically when exiting free camera.
 
 **FOV Control**
-Mouse scroll wheel adjusts field of view while in free camera. Adjustable step size in the menu (0.5–10.0 per tick). FOV range 10–150. FOV automatically restores to your original value when exiting free camera.
+Mouse scroll wheel adjusts field of view while in free camera. Adjustable step size in the menu (0.5–10.0 per tick). FOV range 10–150. FOV automatically restores to your original value when exiting free camera. Zoom is eased in smoothly (menu: Smooth FOV changes, with a smoothing time), so fast scrolling glides instead of jumping.
+
+**Fly Speed**
+Hold the slow key (Left Alt by default) to fly at 1/5 speed, or bind a fast key in the menu to fly at 1.5-10 times the speed while it is held. Ctrl + mouse wheel changes the base fly speed on the fly and saves it.
 
 **Screenshot Hotkey**
 Middle Mouse Button triggers a screenshot (sends PrintScreen) while in free camera.

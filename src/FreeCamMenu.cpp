@@ -42,6 +42,10 @@ namespace FreeCamMenu {
     static int   s_rmbAction     = 0;
     static bool  s_dialogueCam   = false;  // --Claude: free-cam movement during dialogue
     static int   s_slowKey       = 0x38;   // 0.7.1: hold-to-slow key (Left Alt)
+    static int   s_fastKey       = 0;      // 0.14.0: hold-to-go-fast key (0 = off)
+    static float s_fastMult      = 4.0f;   // 0.14.0
+    static bool  s_smoothFov     = true;   // 0.14.0: eased FOV changes
+    static float s_fovSmoothTime = 0.12f;  // 0.14.0
     static bool  s_disableShift  = false;  // 0.7.1
     static bool  s_disableSpace  = true;   // 0.7.1; default ON since 0.7.6 (keeps 0.7.3-0.7.5's jump block)
     static bool  s_disableActivate = true; // 0.7.2
@@ -208,6 +212,10 @@ namespace FreeCamMenu {
         WriteINIInt("Camera", "bBlockAttacks", s_blockAttacks ? 1 : 0);
         WriteINIInt("Camera", "bDialogueCamera", s_dialogueCam ? 1 : 0);
         WriteINIInt("Hotkeys", "iSlowKey", s_slowKey);
+        WriteINIInt("Hotkeys", "iFastKey", s_fastKey);
+        WriteINIFloat("Camera", "fFastMultiplier", s_fastMult);
+        WriteINIInt("FOV", "bSmooth", s_smoothFov ? 1 : 0);
+        WriteINIFloat("FOV", "fSmoothTime", s_fovSmoothTime);
         WriteINIInt("Camera", "bDisableShift", s_disableShift ? 1 : 0);
         WriteINIInt("Camera", "bDisableSpace", s_disableSpace ? 1 : 0);
         WriteINIInt("Camera", "bDisableActivate", s_disableActivate ? 1 : 0);
@@ -340,6 +348,10 @@ namespace FreeCamMenu {
         settings.rmbAction      = s_rmbAction;
         settings.dialogueCam    = s_dialogueCam;
         settings.slowKey       = static_cast<std::uint32_t>(s_slowKey);
+        settings.fastKey       = static_cast<std::uint32_t>(s_fastKey);
+        settings.fastMultiplier = s_fastMult;
+        settings.smoothFov     = s_smoothFov;
+        settings.fovSmoothTime = s_fovSmoothTime;
         settings.disableActivate = s_disableActivate;
         settings.disableShift  = s_disableShift;
         settings.disableSpace  = s_disableSpace;
@@ -420,6 +432,18 @@ namespace FreeCamMenu {
         ImGuiMCP::TextColored({ 0.5f, 0.5f, 0.5f, 1.0f },
             "Hold to fly at 1/5 speed. Default Left Alt; unset = off.");
 
+        if (KeyBindField("fastKey", "Fast movement (hold)", &s_fastKey)) {
+            ApplyToController();
+            SaveINI();
+        }
+        ImGuiMCP::SetNextItemWidth(150.0f);
+        if (ImGuiMCP::SliderFloat("Fast speed (times)##fastMult", &s_fastMult, 1.5f, 10.0f, "%.1f")) {
+            ApplyToController();
+            SaveINI();
+        }
+        ImGuiMCP::TextColored({ 0.5f, 0.5f, 0.5f, 1.0f },
+            "Hold to fly faster. Unset by default. Ctrl + mouse wheel changes the base speed while flying.");
+
         if (ImGuiMCP::Checkbox("Disable Shift in free cam##noshift", &s_disableShift)) {
             ApplyToController();
             SaveINI();
@@ -457,6 +481,19 @@ namespace FreeCamMenu {
         if (ImGuiMCP::SliderFloat("FOV Step (mouse wheel)##fov", &s_fovStep, 0.5f, 10.0f, "%.1f")) {
             ApplyToController();
             SaveINI();
+        }
+
+        if (ImGuiMCP::Checkbox("Smooth FOV changes##smoothFov", &s_smoothFov)) {
+            ApplyToController();
+            SaveINI();
+        }
+        if (s_smoothFov) {
+            ImGuiMCP::SameLine();
+            ImGuiMCP::SetNextItemWidth(150.0f);
+            if (ImGuiMCP::SliderFloat("Smoothing time (s)##fovSmoothTime", &s_fovSmoothTime, 0.02f, 0.6f, "%.2f")) {
+                ApplyToController();
+                SaveINI();
+            }
         }
 
         ImGuiMCP::SetNextItemWidth(150.0f);
@@ -922,6 +959,8 @@ namespace FreeCamMenu {
              "; TFCam never resets it. Delete it to return to the defaults. The in-game page (SKSE Menu Framework >\n"
              "; FreeCam > Settings) saves every change here immediately.\n\n";
         f << "[FOV]\n; Degrees per mouse wheel tick\nfStep=" << fl(s_fovStep) << "\n"
+          << "; 1 = the wheel eases the FOV in instead of jumping; fSmoothTime = seconds (0.02 .. 0.6)\nbSmooth="
+          << (s_smoothFov ? 1 : 0) << "\nfSmoothTime=" << fl(s_fovSmoothTime) << "\n"
           << "; FOV range limits\nfMin=" << fl(s_fovMin) << "\nfMax=" << fl(s_fovMax) << "\n\n";
         f << "[Roll]\n; Radians per second while key held\nfSpeed=" << fl(s_rollSpeed) << "\n"
           << "; Q = roll counter-clockwise (0x10 = 16)\niKeyCCW=" << s_rollCCWKey << "\n"
@@ -930,8 +969,10 @@ namespace FreeCamMenu {
           << "; R = reset FOV + roll (0x13 = 19)\niResetKey=" << s_resetKey << "\n"
           << "; Keyboard shortcuts for freeze time / screenshot (0 = unmapped: Shift+Middle Click / Middle Click)\n"
           << "iFreezeTimeKey=" << s_freezeTimeKey << "\niScreenshotKey=" << s_screenshotKey << "\n"
-          << "; Hold to fly at 1/5 speed. DX scancode, 0x38 = Left Alt (56). 0 = off\niSlowKey=" << s_slowKey << "\n\n";
-        f << "[Camera]\nfSpeed=" << fl(s_cameraSpeed) << "\nbHideHUD=" << (s_hideHUD ? 1 : 0)
+          << "; Hold to fly at 1/5 speed. DX scancode, 0x38 = Left Alt (56). 0 = off\niSlowKey=" << s_slowKey << "\n"
+          << "; Hold to fly faster (fFastMultiplier times the speed). DX scancode. 0 = off\niFastKey=" << s_fastKey << "\n\n";
+        f << "[Camera]\nfSpeed=" << fl(s_cameraSpeed) << "\n; 1.5 .. 10\nfFastMultiplier=" << fl(s_fastMult)
+          << "\nbHideHUD=" << (s_hideHUD ? 1 : 0)
           << "\nbBlockAttacks=" << (s_blockAttacks ? 1 : 0) << "\niLMBAction=" << s_lmbAction
           << "\niRMBAction=" << s_rmbAction << "\n"
           << "; 1 = in free cam Shift no longer drives sprint / run / run toggle (incl. a Shift+key run toggle). "
@@ -986,6 +1027,11 @@ namespace FreeCamMenu {
         SKSE::log::info("FreeCamMenu: first run - created {} from the code defaults", a_path);
     }
 
+    void SetCameraSpeed(float a_speed) {
+        if (std::isfinite(a_speed)) s_cameraSpeed = std::clamp(a_speed, 0.5f, 50.0f);
+        SaveINI();
+    }
+
     void LoadSettings() {
         const char* ini = GetINIPath();
         // Through MO2's virtual file system too (the same open GetPrivateProfileString does).
@@ -1021,6 +1067,10 @@ namespace FreeCamMenu {
         s_blockAttacks = readInt("Camera", "bBlockAttacks", 1) != 0;
         s_dialogueCam  = false; // SHELVED 2026-09-17: forced off regardless of ini (drive not working properly yet)
         s_slowKey      = readInt("Hotkeys", "iSlowKey", 0x38);
+        s_fastKey      = readInt("Hotkeys", "iFastKey", 0);
+        s_fastMult     = readFloat("Camera", "fFastMultiplier", 4.0f);
+        s_smoothFov    = readInt("FOV", "bSmooth", 1) != 0;
+        s_fovSmoothTime = readFloat("FOV", "fSmoothTime", 0.12f);
         s_disableShift = readInt("Camera", "bDisableShift", 0) != 0;
         s_disableSpace = readInt("Camera", "bDisableSpace", 1) != 0;  // 0.7.6: default ON, see s_disableSpace
         s_disableActivate = readInt("Camera", "bDisableActivate", 1) != 0;
@@ -1157,6 +1207,9 @@ namespace FreeCamMenu {
             s_lightColorG = std::clamp(s_lightColorG, 0, 255);
             s_lightColorB = std::clamp(s_lightColorB, 0, 255);
             fixed |= (r0 != s_lightColorR || g0 != s_lightColorG || b0 != s_lightColorB);
+            fixed |= range(s_fastMult, 1.5f, 10.0f, 4.0f);
+            fixed |= range(s_fovSmoothTime, 0.02f, 0.6f, 0.12f);
+            s_fastKey = std::clamp(s_fastKey, 0, 255);
             s_lmbAction = std::clamp(s_lmbAction, 0, 10);  // the Combo has 11 entries
             s_rmbAction = std::clamp(s_rmbAction, 0, 10);
 
@@ -1194,6 +1247,10 @@ namespace FreeCamMenu {
         settings.rmbAction     = s_rmbAction;
         settings.dialogueCam   = s_dialogueCam;
         settings.slowKey       = static_cast<std::uint32_t>(s_slowKey);
+        settings.fastKey       = static_cast<std::uint32_t>(s_fastKey);
+        settings.fastMultiplier = s_fastMult;
+        settings.smoothFov     = s_smoothFov;
+        settings.fovSmoothTime = s_fovSmoothTime;
         settings.disableActivate = s_disableActivate;
         settings.disableShift  = s_disableShift;
         settings.disableSpace  = s_disableSpace;

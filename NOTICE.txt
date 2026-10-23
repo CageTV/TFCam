@@ -6,7 +6,7 @@ is in LICENSE.txt (the license file of the original TFCam, unchanged).
 Original work: TFCam by StinkyPumpkin (spyder33), https://github.com/StinkyPumpkin/TFCam
 Copyright (c) 2026 StinkyPumpkin.
 
-Modified version: TFCam 0.13.1 and later, by CageTV, https://github.com/CageTV/TFCam
+Modified version: TFCam 0.13.1 and later (0.14.0 adds the features listed in the changelog), by CageTV, https://github.com/CageTV/TFCam
 Copyright (c) 2026 CageTV, for the changes listed in the README changelog. The modified version is distributed under
 the same license, the GNU General Public License version 3, as the original.
 

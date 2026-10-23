@@ -5,6 +5,7 @@ namespace FreeCamMenu {
     void LoadSettings();
     void ApplyGameSettings();  // apply camera speed to game setting (call after DataLoaded)
     float GetCameraSpeed();    // current user-set camera speed
+    void  SetCameraSpeed(float a_speed);  // 0.14.0: Ctrl + mouse wheel in free cam; clamps, applies and saves it
     int  GetFreeFlyKey();
 
     bool IsCapturingKey();

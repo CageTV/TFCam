@@ -15,8 +15,7 @@
 #include <RE/A/AttackBlockHandler.h>
 #include <RE/M/MouseMoveEvent.h>
 
-#include <atomic>
-
+#include <algorithm>
 #include <atomic>
 #include <cmath>
 #include <cstdio>
@@ -35,6 +34,14 @@ namespace FreeCam {
     static float    s_baseFOV   = 0.0f;
     static bool     s_altSlow   = false;  // Alt slow-mode active
     static bool     s_slowHeld  = false;  // configurable slow key currently held (fed by the input sink)
+    static bool     s_fastHeld  = false;  // 0.14.0: configurable fast key currently held
+    static float    s_speedScale = 1.0f;  // 0.14.0: factor on the base speed while s_altSlow (1/5 slow, fastMultiplier fast)
+    // 0.14.0 smooth FOV: the wheel / FOV actions set a target and the Update hook eases the live FOV toward it. Whenever
+    // the live FOV is not what the easing wrote last (another mod, the Scene Camera, a menu restore), it is theirs and
+    // the easing lets go.
+    static bool     s_fovEasing = false;
+    static float    s_fovTarget = 0.0f;
+    static float    s_fovLast   = 0.0f;
     // FreeCameraState fields (capture + freeze the transform). 0.8.0: read through CommonLibSSE-NG's typed
     // RE::FreeCameraState instead of raw offsets. NG keeps one layout for SE 1.5.97, AE 1.6.x and 1.7.x (no 1.7
     // change modelled for this class); the asserts pin it to the offsets 0.7.x hard-coded, so the fields read and
@@ -54,6 +61,23 @@ namespace FreeCam {
     // 0.8.0: PlayerCamera's FOVs sit in NG's RUNTIME_DATA2 block (0x13C on SE/AE incl. 1.7, 0x158 on VR).
     static float& WorldFOV(RE::PlayerCamera* a_cam) { return a_cam->GetRuntimeData2().worldFOV; }
     static float& FirstPersonFOV(RE::PlayerCamera* a_cam) { return a_cam->GetRuntimeData2().firstPersonFOV; }
+
+    // 0.14.0: one wheel notch / FOV action. With smoothing on, successive notches add up on the target instead of on the
+    // half-eased live value, so a fast scroll covers the full distance.
+    static void NudgeFOV(RE::PlayerCamera* a_cam, float a_delta) {
+        const float cur = WorldFOV(a_cam);
+        const float lo  = s_settings.fovMin;
+        const float hi  = s_settings.fovMax;
+        if (!s_settings.smoothFov) {
+            s_fovEasing = false;
+            WorldFOV(a_cam) = std::clamp(cur + a_delta, lo, hi);
+            return;
+        }
+        const float from = (s_fovEasing && std::fabs(cur - s_fovLast) < 0.05f) ? s_fovTarget : cur;
+        s_fovTarget = std::clamp(from + a_delta, lo, hi);
+        s_fovLast   = cur;
+        s_fovEasing = true;
+    }
 
     // Menu-exit camera restore: other mods (e.g. Show-Player-In-Inventory) reposition
     // the camera on menu open and RESET it on menu close — which yanks the free cam
@@ -81,6 +105,16 @@ namespace FreeCam {
         if (setting) {
             setting->data.f = speed;
         }
+    }
+
+    // 0.14.0: Ctrl + mouse wheel = the base fly speed, up or down 15% a notch (0.5 .. 50, the menu slider's range). Saved to
+    // TFCam.ini like the slider; the slow / fast key factor stays applied on top.
+    static void AdjustFlySpeed(int a_dir) {
+        const float before = FreeCamMenu::GetCameraSpeed();
+        FreeCamMenu::SetCameraSpeed(before * (a_dir > 0 ? 1.15f : 1.0f / 1.15f));
+        const float now = FreeCamMenu::GetCameraSpeed();
+        SetCameraSpeed(s_altSlow ? now * s_speedScale : now);
+        SKSE::log::info("FreeCam: fly speed {:.1f} (Ctrl + wheel)", now);  // no HUD message: the HUD is hidden in free cam
     }
 
     // ---- 0.7.9 diagnostics + scripted-tfc guard state ---------------------------------------------------------
@@ -264,7 +298,7 @@ namespace FreeCam {
     void ReapplyCameraSpeed() {
         RunHookWork([] {
             const float speed = FreeCamMenu::GetCameraSpeed();
-            SetCameraSpeed(s_altSlow ? speed / 5.0f : speed);
+            SetCameraSpeed(s_altSlow ? speed * s_speedScale : speed);
         });
     }
 
@@ -354,6 +388,7 @@ namespace FreeCam {
     }
 
     static void ResetCamera() {
+        s_fovEasing = false;  // 0.14.0: a reset is instant and wins over a running ease
         if (s_baseFOV > 0.0f) {
             if (auto* cam = RE::PlayerCamera::GetSingleton())
                 WorldFOV(cam) = s_baseFOV;
@@ -451,12 +486,10 @@ namespace FreeCam {
                 CameraLight::Toggle();
                 break;
             case kFovIn:
-                if (cam) WorldFOV(cam) = std::clamp(WorldFOV(cam) - s_settings.fovStep,
-                                                    s_settings.fovMin, s_settings.fovMax);
+                if (cam) NudgeFOV(cam, -s_settings.fovStep);
                 break;
             case kFovOut:
-                if (cam) WorldFOV(cam) = std::clamp(WorldFOV(cam) + s_settings.fovStep,
-                                                    s_settings.fovMin, s_settings.fovMax);
+                if (cam) NudgeFOV(cam, s_settings.fovStep);
                 break;
             case kResetCam:
                 ResetAll();
@@ -624,6 +657,32 @@ namespace FreeCam {
             // 0.10.0: while the Scene Camera orbits / looks through a partner's eyes / blends to a shot, it writes the
             // whole camera below; the mouse-button moves and the dialogue / RaceMenu drive stand down.
             const bool sceneCamOwns = SceneCam::OwnsMotion();
+
+            // 0.14.0 smooth FOV: ease the live FOV toward the wheel's target (exponential, frame-rate independent). Real
+            // time, so it also runs with time frozen. It lets go the moment anything else changes the FOV.
+            {
+                static std::int64_t s_easeQpc = 0;
+                const std::int64_t  nowQpc    = QpcNow();
+                const float         dt        = s_easeQpc ? static_cast<float>(MsSince(s_easeQpc) / 1000.0) : 0.0f;
+                s_easeQpc                     = nowQpc;
+                if (s_fovEasing) {
+                    auto* cam = RE::PlayerCamera::GetSingleton();
+                    if (!driving || !cam || !cam->IsInFreeCameraMode() || SceneCam::OwnsMotion() ||
+                        std::fabs(WorldFOV(cam) - s_fovLast) > 0.05f) {
+                        s_fovEasing = false;
+                    } else {
+                        const float tau  = std::max(s_settings.fovSmoothTime, 0.01f);
+                        const float step = 1.0f - std::exp(-std::clamp(dt, 0.0f, 0.1f) / tau);
+                        float       next = WorldFOV(cam) + (s_fovTarget - WorldFOV(cam)) * step;
+                        if (std::fabs(s_fovTarget - next) < 0.02f) {
+                            next        = s_fovTarget;
+                            s_fovEasing = false;
+                        }
+                        WorldFOV(cam) = next;
+                        s_fovLast     = next;
+                    }
+                }
+            }
 
             // Continuous move actions (LMB/RMB remapped) — applied AFTER Update
             // by adding to translation. Only when blockAttacks is on (remap active).
@@ -891,6 +950,8 @@ namespace FreeCam {
                 SetCameraSpeed(FreeCamMenu::GetCameraSpeed());
                 s_altSlow = false;
             }
+            s_speedScale = 1.0f;
+            s_fovEasing  = false;  // 0.14.0
 
             // Turn off camera light and restore HUD before exiting free cam.
             // (HUDHider only restores what it hid, so this is safe for FCFW sessions too.)
@@ -1228,6 +1289,10 @@ namespace FreeCam {
                     code == s_settings.slowKey) {
                     s_slowHeld = btn->IsPressed();
                 }
+                if (device == RE::INPUT_DEVICE::kKeyboard && s_settings.fastKey != 0 &&
+                    code == s_settings.fastKey) {
+                    s_fastHeld = btn->IsPressed();
+                }
 
                 // Everything below only works when free cam is active
                 if (!active) continue;
@@ -1285,13 +1350,16 @@ namespace FreeCam {
 
                 // Slow-mode (configurable key, default Left Alt): check state on every input event
                 {
-                    bool altHeld = s_slowHeld;
-                    if (altHeld && !s_altSlow) {
-                        SetCameraSpeed(FreeCamMenu::GetCameraSpeed() / 5.0f);
+                    // 0.14.0: slow wins over fast when both keys are held.
+                    const float scale = s_slowHeld ? 0.2f : (s_fastHeld ? s_settings.fastMultiplier : 1.0f);
+                    if (scale != 1.0f && (!s_altSlow || scale != s_speedScale)) {
+                        s_speedScale = scale;
+                        SetCameraSpeed(FreeCamMenu::GetCameraSpeed() * s_speedScale);
                         s_altSlow = true;
-                    } else if (!altHeld && s_altSlow) {
+                    } else if (scale == 1.0f && s_altSlow) {
                         SetCameraSpeed(FreeCamMenu::GetCameraSpeed());
                         s_altSlow = false;
+                        s_speedScale = 1.0f;
                     }
                 }
 
@@ -1316,32 +1384,30 @@ namespace FreeCam {
                     // it is the eye-view FOV (the drive writes that FOV every frame).
                     if (code == RE::BSWin32MouseDevice::Key::kWheelUp) {
                         bool shiftHeld = (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0;
+                        const bool ctrlHeld = (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0;
                         if (shiftHeld) {
                             CameraLight::ScrollUp();
+                        } else if (ctrlHeld && driving) {
+                            AdjustFlySpeed(+1);  // 0.14.0: Ctrl + wheel = fly speed
                         } else if (driving && SceneCam::OnWheel(-1)) {
                             // orbit radius / eye FOV
                         } else if (driving) {
                             auto* cam = RE::PlayerCamera::GetSingleton();
-                            if (cam) {
-                                WorldFOV(cam) = std::clamp(
-                                    WorldFOV(cam) - s_settings.fovStep,
-                                    s_settings.fovMin, s_settings.fovMax);
-                            }
+                            if (cam) NudgeFOV(cam, -s_settings.fovStep);
                         }
                     }
                     else if (code == RE::BSWin32MouseDevice::Key::kWheelDown) {
                         bool shiftHeld = (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0;
+                        const bool ctrlHeld = (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0;
                         if (shiftHeld) {
                             CameraLight::ScrollDown();
+                        } else if (ctrlHeld && driving) {
+                            AdjustFlySpeed(-1);
                         } else if (driving && SceneCam::OnWheel(1)) {
                             // orbit radius / eye FOV
                         } else if (driving) {
                             auto* cam = RE::PlayerCamera::GetSingleton();
-                            if (cam) {
-                                WorldFOV(cam) = std::clamp(
-                                    WorldFOV(cam) + s_settings.fovStep,
-                                    s_settings.fovMin, s_settings.fovMax);
-                            }
+                            if (cam) NudgeFOV(cam, s_settings.fovStep);
                         }
                     }
                 }

@@ -109,6 +109,16 @@ the scene / stage ids, shots saved / recalled / deleted, refusals, automatic fre
 
 ## Changelog
 
+**0.14.0** (fork by CageTV)
+- *Smooth FOV changes* (`[FOV] bSmooth`, default on, `fSmoothTime` 0.12 s): the mouse wheel and the FOV in / out click actions ease the FOV toward
+  a target instead of jumping, and scrolling fast adds up on the target. The easing is frame-rate independent, also runs with time frozen,
+  and lets go as soon as anything else changes the FOV (the Scene Camera, a menu restore, reset, leaving the free camera). Turn it off to get
+  the old instant steps.
+- *Fast movement* key (`[Hotkeys] iFastKey`, unset by default; `[Camera] fFastMultiplier`, 4, range 1.5 to 10): hold it to fly at that many times the
+  speed. The slow key (1/5) wins when both are held.
+- **Ctrl + mouse wheel** in free-fly changes the base fly speed by 15% a notch (0.5 to 50, the slider's range) and saves it to TFCam.ini; the slow /
+  fast factor stays applied on top. Each change is logged.
+
 **0.13.1** (fork by CageTV)
 - A TFCam.ini with values outside what the menu allows (or text that is not a number) no longer reaches the camera: speed, FOV step,
   FOV limits, roll speed, light radius / fade / colour, the click actions and the cell-entry camera values are brought back inside the
