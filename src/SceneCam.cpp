@@ -21,6 +21,8 @@
 #include <ctime>
 #include <format>
 #include <functional>
+#include <iterator>
+#include <limits>
 #include <mutex>
 #include <string>
 #include <string_view>
@@ -45,6 +47,10 @@ namespace SceneCam {
         constexpr double kAutoWindow     = 5.0;                // a stage shot is applied if the free cam arrives within this;
                                                                // 0.13.0: an automatic free cam starts within this once clear
         constexpr double kSaveDebounce   = 0.75;               // ini save after the last wheel notch / SLUI change
+        constexpr float  kOrbitElMin     = -80.0f * kDegToRad; // 0.15.0 mouse tilt: looking up from below ...
+        constexpr float  kOrbitElMax     = 85.0f * kDegToRad;  // ... to a top view (the vanilla pitch clamp stays clear)
+        constexpr float  kFloorMargin    = 12.0f;              // 0.15.0: orbit / preset camera at least this above the floor
+        constexpr float  kPresetHalfLife = 0.3f;               // 0.15.0: preset view chase (a new view, a new stage)
 
         Config s_cfg;
 
@@ -262,8 +268,56 @@ namespace SceneCam {
             float        breath = 0.0f;  // elevation breathing phase, degrees
             float        entryFOV = 0.0f;  // restored when the orbit ends
             float        aim    = 0.0f;  // 0.13.0: look-at height offset, chased toward the setting
+            float        tilt   = 0.0f;  // 0.15.0: the mouse's up / down on top of the tilt setting, radians
         };
         OrbitState s_orbit;
+
+        // 0.15.0 preset view: fixed views round the player's scene. The camera chases the chosen view in orbit terms
+        // (azimuth / elevation / distance round the smoothed scene centre), so a new view swings round the actors and
+        // never through them. aimW blends the look: 0 = at the centre (the built-in views), 1 = fixed angles (the
+        // stage's saved shot, and the camera's own angles at entry, turned towards the centre from there).
+        struct PresetState {
+            int          view     = 1;  // 0 = the stage's saved shot, 1..kPresetCount = kPresets[view - 1]
+            RE::NiPoint3 target{};      // smoothed torso centre
+            float        az       = 0.0f;
+            float        el       = 0.0f;
+            float        dist     = 0.0f;
+            float        fixYaw   = 0.0f;
+            float        fixPitch = 0.0f;
+            float        aimW     = 1.0f;
+            float        roll     = 0.0f;
+            float        fov      = 0.0f;
+            float        entryFOV = 0.0f;  // restored when preset view ends
+        };
+        PresetState s_preset;
+        bool        s_placing = false;  // 0.15.0 "set cam pos": the middle mouse button saves the stage's shot
+
+        // Azimuth round from the player's front (+ = her right), elevation above the centre, distance, FOV.
+        struct PresetDef {
+            const char* name;
+            float       az;
+            float       el;
+            float       dist;
+            float       fov;
+        };
+        constexpr PresetDef kPresets[] = {
+            { "Front", 0.0f, 15.0f, 140.0f, 70.0f },
+            { "Front right", 45.0f, 20.0f, 130.0f, 70.0f },
+            { "Right", 90.0f, 15.0f, 120.0f, 70.0f },
+            { "Back right", 135.0f, 25.0f, 130.0f, 70.0f },
+            { "Back", 180.0f, 15.0f, 140.0f, 70.0f },
+            { "Back left", 225.0f, 25.0f, 130.0f, 70.0f },
+            { "Left", 270.0f, 15.0f, 120.0f, 70.0f },
+            { "Front left", 315.0f, 20.0f, 130.0f, 70.0f },
+            { "Top", 0.0f, 75.0f, 170.0f, 70.0f },
+            { "Low", 30.0f, -10.0f, 110.0f, 70.0f },
+        };
+        constexpr int kPresetCount = static_cast<int>(std::size(kPresets));
+
+        const char* PresetName(int a_view) {
+            if (a_view == 0) return "Saved shot";
+            return a_view >= 1 && a_view <= kPresetCount ? kPresets[a_view - 1].name : "";
+        }
 
         struct EyeState {
             RE::ActorHandle target;
@@ -291,7 +345,7 @@ namespace SceneCam {
         };
         EyeState s_eye;
 
-        enum class Req { kNone, kOrbit, kEye, kRecall, kFurniture, kAutoShot };
+        enum class Req { kNone, kOrbit, kEye, kRecall, kFurniture, kAutoShot, kPreset, kPlace };
         Req    s_pending      = Req::kNone;  // waits for TFCam free-fly (entered on the request)
         double s_pendingUntil = 0.0;
 
@@ -302,6 +356,8 @@ namespace SceneCam {
             case Req::kRecall: return "go to shot";
             case Req::kFurniture: return "furniture shot";
             case Req::kAutoShot: return "automatic shot";
+            case Req::kPreset: return "preset view";
+            case Req::kPlace:  return "set cam pos";
             default:           return "none";
             }
         }
@@ -335,6 +391,7 @@ namespace SceneCam {
         std::mutex                 s_statusLock;
         TFCAM_API::SceneCamStatus  s_status{};
         TFCAM_API::SceneCamStatus3 s_status3{};  // 0.13.0, API v3
+        TFCAM_API::SceneCamPreset4 s_status4{};  // 0.15.0, API v4
         int                       s_statusSceneShots = 0;
         std::string               s_statusEvent;
 
@@ -733,8 +790,8 @@ namespace SceneCam {
 
         // ---- orbit target ----------------------------------------------------------------------------------------------
         // The player's scene actors; else the posed actor; else the player (0.13.0 a_playerOnly: the player). Centre of
-        // their torso points.
-        bool OrbitTargetRaw(RE::NiPoint3& a_out, std::string* a_what, bool a_playerOnly = false) {
+        // their torso points. 0.15.0 a_floor: the lowest of their feet (the floor the orbit / preset camera stays above).
+        bool OrbitTargetRaw(RE::NiPoint3& a_out, std::string* a_what, bool a_playerOnly = false, float* a_floor = nullptr) {
             std::vector<ActorPtr> list;
             const char*           what = "the scene's actors";
             if (!a_playerOnly) {
@@ -757,14 +814,17 @@ namespace SceneCam {
             }
             if (list.empty()) return false;
             RE::NiPoint3 sum{};
+            float        floor = (std::numeric_limits<float>::max)();
             for (auto& actor : list) {
                 const auto p = TorsoPoint(actor.get());
                 sum.x += p.x;
                 sum.y += p.y;
                 sum.z += p.z;
+                floor = (std::min)(floor, actor->GetPosition().z);
             }
             const float n = static_cast<float>(list.size());
             a_out         = { sum.x / n, sum.y / n, sum.z / n };
+            if (a_floor) *a_floor = floor;
             if (a_what) *a_what = std::format("{} ({})", what, list.size());
             return true;
         }
@@ -776,6 +836,20 @@ namespace SceneCam {
             if (a_restoreFOV && CurrentFreeCam() && FreeCam::TFCamDriving()) SetFOV(s_orbit.entryFOV);
             Event(std::format("orbit off ({}) - the camera stays where it is{}", a_why,
                 a_restoreFOV ? std::format(", FOV back to {:.0f}", s_orbit.entryFOV) : std::string()));
+        }
+
+        void LeavePreset(std::string_view a_why, bool a_restoreFOV) {
+            if (s_mode != TFCAM_API::kModePreset) return;
+            s_mode = TFCAM_API::kModeFree;
+            if (a_restoreFOV && CurrentFreeCam() && FreeCam::TFCamDriving()) SetFOV(s_preset.entryFOV);
+            Event(std::format("preset view off ({}) - the camera stays where it is{}", a_why,
+                a_restoreFOV ? std::format(", FOV back to {:.0f}", s_preset.entryFOV) : std::string()));
+        }
+
+        void EndPlacing(std::string_view a_why) {
+            if (!s_placing) return;
+            s_placing = false;
+            Event(std::format("set cam pos off ({})", a_why));
         }
 
         void CleanupEye() {
@@ -802,11 +876,13 @@ namespace SceneCam {
 
         // No camera to move any more (free cam ended, another camera took it, game load): only undo our changes.
         void DropModes(std::string_view a_why, bool a_restoreFOV) {
-            const bool any = s_mode != TFCAM_API::kModeFree || s_blend.active;
+            const bool any = s_mode != TFCAM_API::kModeFree || s_blend.active || s_placing;
             if (a_restoreFOV && Cam() && Cam()->IsInFreeCameraMode()) {
                 if (s_mode == TFCAM_API::kModeOrbit) SetFOV(s_orbit.entryFOV);
                 if (s_mode == TFCAM_API::kModeEye) SetFOV(s_eye.pre.fov);
+                if (s_mode == TFCAM_API::kModePreset) SetFOV(s_preset.entryFOV);
             }
+            s_placing      = false;
             if (s_mode == TFCAM_API::kModeEye) CleanupEye();
             s_mode         = TFCAM_API::kModeFree;
             s_blend.active = false;
@@ -843,9 +919,13 @@ namespace SceneCam {
 
         void EnterOrbit(RE::FreeCameraState* a_fcs, std::string_view a_source) {
             // From eye view: start where the eyes were, and give the pre-eye-view FOV back when the orbit ends.
-            const bool  fromEye   = s_mode == TFCAM_API::kModeEye;
-            const float preEyeFOV = s_eye.pre.fov;
+            const bool  fromEye      = s_mode == TFCAM_API::kModeEye;
+            const float preEyeFOV    = s_eye.pre.fov;
+            const bool  fromPreset   = s_mode == TFCAM_API::kModePreset;  // 0.15.0: its pre-preset FOV comes back too
+            const float prePresetFOV = s_preset.entryFOV;
             LeaveEye("orbit turned on", false);
+            LeavePreset("orbit turned on", false);
+            EndPlacing("orbit turned on");
             s_blend.active = false;
             RE::NiPoint3 target{};
             std::string  what;
@@ -879,7 +959,7 @@ namespace SceneCam {
             s_orbit.fov0     = cur.fov;
             s_orbit.yaw0     = cur.yaw;
             s_orbit.pitch0   = cur.pitch;
-            s_orbit.entryFOV = fromEye && preEyeFOV > 0.0f ? preEyeFOV : cur.fov;
+            s_orbit.entryFOV = fromEye && preEyeFOV > 0.0f ? preEyeFOV : (fromPreset && prePresetFOV > 0.0f ? prePresetFOV : cur.fov);
             s_orbit.aim      = s_cfg.orbitAim;
             s_mode           = TFCAM_API::kModeOrbit;
             s_autoOwnsFree   = false;  // the user took this free camera over: it stays on when an NPC pose ends
@@ -912,9 +992,11 @@ namespace SceneCam {
                 return false;
             }
             // From orbit: blend from the orbit's pose and FOV; leaving eye view later returns to the pre-orbit FOV.
-            const bool  fromOrbit = s_mode == TFCAM_API::kModeOrbit;
-            const float orbitFOV  = s_orbit.entryFOV;
+            const bool  fromOrbit = s_mode == TFCAM_API::kModeOrbit || s_mode == TFCAM_API::kModePreset;
+            const float orbitFOV  = s_mode == TFCAM_API::kModePreset ? s_preset.entryFOV : s_orbit.entryFOV;
             LeaveOrbit("eye view turned on", false);
+            LeavePreset("eye view turned on", false);
+            EndPlacing("eye view turned on");
             s_blend.active  = false;
             s_eye.pre       = ReadPose(a_fcs);
             s_eye.blendFrom = s_eye.pre;
@@ -931,6 +1013,86 @@ namespace SceneCam {
                 partners[idx]->GetName(), partners[idx]->GetFormID(), s_cfg.eyeFOV, s_cfg.eyeNearClip,
                 s_cfg.eyeHideHead ? "hidden" : "shown"));
             return true;
+        }
+
+        // ---- 0.15.0 preset view / set cam pos ---------------------------------------------------------------------------
+        // The current stage's saved shot (the preset view's view 0).
+        const SceneShots::Shot* StageShot(ShotContext& a_ctx) {
+            a_ctx = StageContext();
+            return a_ctx.ok ? SceneShots::Find(a_ctx.key) : nullptr;
+        }
+
+        // a_view: 0 = the stage's saved shot (the front view when there is none), 1..kPresetCount, -1 = the saved shot
+        // when there is one, else the front view.
+        void EnterPreset(RE::FreeCameraState* a_fcs, std::string_view a_source, int a_view) {
+            // The FOV from before orbit / eye view comes back when preset view ends.
+            float keepFOV = 0.0f;
+            if (s_mode == TFCAM_API::kModeEye) keepFOV = s_eye.pre.fov;
+            if (s_mode == TFCAM_API::kModeOrbit) keepFOV = s_orbit.entryFOV;
+            LeaveEye("preset view turned on", false);
+            LeaveOrbit("preset view turned on", false);
+            EndPlacing("preset view turned on");
+            s_blend.active = false;
+            RE::NiPoint3 target{};
+            if (!OrbitTargetRaw(target, nullptr)) {
+                Refuse("Preset view: nothing to look at", "preset view: no target (no player?)");
+                return;
+            }
+            const Pose         cur  = ReadPose(a_fcs);
+            const RE::NiPoint3 off  = cur.pos - target;
+            const float        dist = Length(off);
+            s_preset        = PresetState{};
+            s_preset.target = target;
+            if (std::isfinite(dist) && dist >= 1.0f) {
+                s_preset.az   = std::atan2(off.x, off.y);
+                s_preset.el   = std::asin(std::clamp(off.z / dist, -1.0f, 1.0f));
+                s_preset.dist = dist;
+            } else {
+                auto* player  = RE::PlayerCharacter::GetSingleton();
+                s_preset.az   = player ? player->GetAngleZ() : 0.0f;
+                s_preset.el   = kPresets[0].el * kDegToRad;
+                s_preset.dist = kPresets[0].dist;
+            }
+            s_preset.fixYaw   = cur.yaw;
+            s_preset.fixPitch = cur.pitch;
+            s_preset.aimW     = 1.0f;
+            s_preset.roll     = cur.roll;
+            s_preset.fov      = cur.fov;
+            s_preset.entryFOV = keepFOV > 0.0f ? keepFOV : cur.fov;
+            ShotContext ctx;
+            const bool  hasShot = StageShot(ctx) != nullptr;
+            s_preset.view       = a_view < 0 ? (hasShot ? 0 : 1) : (a_view == 0 && !hasShot ? 1 : std::clamp(a_view, 0, kPresetCount));
+            s_mode              = TFCAM_API::kModePreset;
+            s_autoOwnsFree      = false;  // the user took this free camera over
+            Event(std::format("preset view on ({}): {}{}", a_source, PresetName(s_preset.view),
+                hasShot ? " - this stage has a saved shot" : ""));
+        }
+
+        bool StepPresetView(int a_step, std::string_view a_source) {
+            if (s_mode != TFCAM_API::kModePreset) {
+                Refuse("Preset view is not on", std::format("preset step ({}): preset view is not on", a_source));
+                return false;
+            }
+            ShotContext ctx;
+            const int   first = StageShot(ctx) ? 0 : 1;
+            const int   n     = kPresetCount + 1 - first;
+            const int   idx   = (((std::max)(s_preset.view - first, 0) + a_step) % n + n) % n;
+            s_preset.view     = first + idx;
+            Notify(std::format("Camera: {} ({}/{})", PresetName(s_preset.view), idx + 1, n).c_str());
+            Event(std::format("preset view: {} ({})", PresetName(s_preset.view), a_source));
+            return true;
+        }
+
+        void BeginPlacing(std::string_view a_source) {
+            LeaveOrbit("set cam pos", false);
+            LeaveEye("set cam pos", false);
+            LeavePreset("set cam pos", false);
+            s_blend.active = false;
+            s_autoKey.clear();
+            s_autoOwnsFree = false;
+            s_placing      = true;
+            Notify("Set cam pos: fly the camera there, then the middle mouse button saves it for this stage");
+            Event(std::format("set cam pos on ({}) - the middle mouse button saves the stage's shot", a_source));
         }
 
         // TFCam free-fly is needed first: request it and remember what to do once TFCam drives.
@@ -979,6 +1141,46 @@ namespace SceneCam {
             }
             if (WaitForFreeCam(Req::kEye)) return true;
             return EnterEye(CurrentFreeCam(), a_source);
+        }
+
+        bool RequestPreset(std::int32_t a_state, std::string_view a_source) {
+            const bool on = a_state < 0 ? (s_mode != TFCAM_API::kModePreset && s_pending != Req::kPreset) : a_state != 0;
+            if (!on) {
+                if (s_pending == Req::kPreset) {
+                    s_pending = Req::kNone;
+                    Event(std::format("preset view request cancelled ({})", a_source));
+                }
+                LeavePreset(a_source, true);
+                return true;
+            }
+            if (s_mode == TFCAM_API::kModePreset) return true;
+            if (!SceneTracker::PlayerSceneActive()) {
+                Refuse("Preset views need your SexLab scene", std::format("preset view ({}): the player is not in a SexLab scene", a_source));
+                return false;
+            }
+            if (WaitForFreeCam(Req::kPreset)) return true;
+            EnterPreset(CurrentFreeCam(), a_source, -1);
+            return s_mode == TFCAM_API::kModePreset;
+        }
+
+        bool RequestPlacing(std::int32_t a_state, std::string_view a_source) {
+            const bool on = a_state < 0 ? (!s_placing && s_pending != Req::kPlace) : a_state != 0;
+            if (!on) {
+                if (s_pending == Req::kPlace) {
+                    s_pending = Req::kNone;
+                    Event(std::format("set cam pos request cancelled ({})", a_source));
+                }
+                EndPlacing(a_source);
+                return true;
+            }
+            if (s_placing) return true;
+            if (!StageContext().ok) {
+                Refuse("Set cam pos needs your SexLab scene", std::format("set cam pos ({}): no stage of the player's scene known", a_source));
+                return false;
+            }
+            if (WaitForFreeCam(Req::kPlace)) return true;
+            BeginPlacing(a_source);
+            return true;
         }
 
         bool NextEye(std::string_view a_source) {
@@ -1044,6 +1246,7 @@ namespace SceneCam {
             if (WaitForFreeCam(Req::kRecall)) return true;
             LeaveOrbit("going to a saved shot", false);
             LeaveEye("going to a saved shot", false);
+            LeavePreset("going to a saved shot", false);
             StartBlend(ReadPose(CurrentFreeCam()), ShotToPose(*shot, ctx), s_cfg.shotBlend);
             Event(std::format("go to shot ({}) {} over {:.1f} s", a_source, ctx.key, s_cfg.shotBlend));
             return true;
@@ -1306,6 +1509,12 @@ namespace SceneCam {
             case Req::kAutoShot:
                 ApplyAutoShot(a_fcs);
                 break;
+            case Req::kPreset:
+                if (s_mode != TFCAM_API::kModePreset) EnterPreset(a_fcs, "after entering free-fly", -1);
+                break;
+            case Req::kPlace:
+                if (!s_placing) BeginPlacing("after entering free-fly");
+                break;
             default:
                 break;
             }
@@ -1314,7 +1523,7 @@ namespace SceneCam {
         // A stage key changed while TFCam was (or soon is) driving in Free mode: blend to its saved shot.
         void ServiceAuto(RE::FreeCameraState* a_fcs) {
             if (s_autoKey.empty()) return;
-            if (s_mode != TFCAM_API::kModeFree || Now() > s_autoUntil) {
+            if (s_mode != TFCAM_API::kModeFree || s_placing || Now() > s_autoUntil) {
                 s_autoKey.clear();
                 return;
             }
@@ -1340,18 +1549,36 @@ namespace SceneCam {
             }
         }
 
-        void DriveOrbit(RE::FreeCameraState* a_fcs, float a_dt) {
+        // 0.15.0: never under the floor - the camera slides along it instead (it still looks at the centre).
+        void KeepAboveFloor(RE::NiPoint3& a_pos, bool a_haveFloor, float a_floor) {
+            if (a_haveFloor && a_pos.z < a_floor + kFloorMargin) a_pos.z = a_floor + kFloorMargin;
+        }
+
+        void DriveOrbit(RE::FreeCameraState* a_fcs, float a_prePitch, float a_dt) {
             RE::NiPoint3 raw{};
-            if (OrbitTargetRaw(raw, nullptr, s_cfg.orbitTarget == 1)) {
+            float        floor     = 0.0f;
+            const bool   haveFloor = OrbitTargetRaw(raw, nullptr, s_cfg.orbitTarget == 1, &floor);
+            if (haveFloor) {
                 s_orbit.target = Mix(s_orbit.target, raw, ExpWeight(a_dt, kTargetHalfLife));
             }
             s_orbit.t += a_dt;
             s_orbit.az     = WrapPi(s_orbit.az + s_cfg.orbitSpeed * kDegToRad * a_dt);
             // Breathing: +-orbitSway degrees (0.13.0; was a fixed 8) over three orbit periods.
             s_orbit.breath = std::fmod(s_orbit.breath + a_dt * std::fabs(s_cfg.orbitSpeed) / 3.0f, 360.0f);
-            const float elGoal =
+            // 0.15.0 mouse tilt: what the vanilla Update pitched this frame (the user's mouse / stick look) moves the
+            // orbit the same way the view turned - looking down raises the camera (to a top view), looking up lowers
+            // it (to looking up from below). Never under the floor: the tilt stops there instead of winding up.
+            const float base =
                 std::clamp(s_cfg.orbitHeight + s_cfg.orbitSway * std::sin(s_orbit.breath * kDegToRad), -85.0f, 85.0f) *
                 kDegToRad;
+            if (const float dPitch = a_fcs->rotation.x - a_prePitch; std::isfinite(dPitch)) s_orbit.tilt += dPitch;
+            float lo = kOrbitElMin;
+            if (haveFloor && s_orbit.dist > 1.0f) {
+                const float centreZ = s_orbit.target.z + s_orbit.aim;
+                lo = (std::max)(lo, std::asin(std::clamp((floor + kFloorMargin - centreZ) / s_orbit.dist, -1.0f, 1.0f)));
+            }
+            const float elGoal = std::clamp(base + s_orbit.tilt, (std::min)(lo, kOrbitElMax), kOrbitElMax);
+            s_orbit.tilt       = elGoal - base;
             const float entry = s_orbit.t < kOrbitEntrySec ? SmoothStep(s_orbit.t / kOrbitEntrySec) : 1.0f;
             if (s_orbit.t < kOrbitEntrySec) {
                 s_orbit.el   = s_orbit.el0 + (elGoal - s_orbit.el0) * entry;
@@ -1371,6 +1598,7 @@ namespace SceneCam {
             const RE::NiPoint3 dir{ std::sin(s_orbit.az) * ce, std::cos(s_orbit.az) * ce, std::sin(s_orbit.el) };
             Pose p;
             p.pos  = centre + dir * s_orbit.dist;
+            KeepAboveFloor(p.pos, haveFloor, floor);
             LookAngles(centre - p.pos, p.yaw, p.pitch);
             if (entry < 1.0f) {  // turn towards the target over the same second, no snap
                 p.yaw   = s_orbit.yaw0 + WrapPi(p.yaw - s_orbit.yaw0) * entry;
@@ -1380,6 +1608,64 @@ namespace SceneCam {
             p.fov  = s_orbit.fov;
             WritePose(a_fcs, p, false);
             CamCollision::Request(s_orbit.target, "scene orbit");  // 0.12.0
+        }
+
+        // 0.15.0: the chosen view, chased round the smoothed scene centre.
+        void DrivePreset(RE::FreeCameraState* a_fcs, float a_dt) {
+            RE::NiPoint3 raw{};
+            float        floor     = 0.0f;
+            const bool   haveFloor = OrbitTargetRaw(raw, nullptr, false, &floor);
+            if (haveFloor) s_preset.target = Mix(s_preset.target, raw, ExpWeight(a_dt, kTargetHalfLife));
+            const RE::NiPoint3 centre = s_preset.target;
+
+            ShotContext ctx;
+            const auto* shot = StageShot(ctx);
+            if (s_preset.view == 0 && !shot) {
+                s_preset.view = 1;
+                Event("preset view: no saved shot for this stage - front view");
+            }
+            float gAz = 0.0f, gEl = 0.0f, gDist = 0.0f, gFov = 0.0f, gRoll = 0.0f, gAim = 0.0f;
+            if (s_preset.view == 0) {
+                const Pose         sp  = ShotToPose(*shot, ctx);
+                const RE::NiPoint3 off = sp.pos - centre;
+                gDist                  = (std::max)(Length(off), 1.0f);
+                gAz                    = std::atan2(off.x, off.y);
+                gEl                    = std::asin(std::clamp(off.z / gDist, -1.0f, 1.0f));
+                gFov                   = sp.fov;
+                gRoll                  = sp.roll;
+                gAim                   = 1.0f;
+                const float w          = ExpWeight(a_dt, kPresetHalfLife);
+                s_preset.fixYaw += WrapPi(sp.yaw - s_preset.fixYaw) * w;
+                s_preset.fixPitch += (sp.pitch - s_preset.fixPitch) * w;
+            } else {
+                const auto& d      = kPresets[s_preset.view - 1];
+                auto*       player = RE::PlayerCharacter::GetSingleton();
+                gAz                = (player ? player->GetAngleZ() : 0.0f) + d.az * kDegToRad;
+                gEl                = d.el * kDegToRad;
+                gDist              = d.dist;
+                gFov               = d.fov;
+            }
+            const float w = ExpWeight(a_dt, kPresetHalfLife);
+            s_preset.az   = WrapPi(s_preset.az + WrapPi(gAz - s_preset.az) * w);
+            s_preset.el += (gEl - s_preset.el) * w;
+            s_preset.dist += (gDist - s_preset.dist) * w;
+            s_preset.fov += (gFov - s_preset.fov) * w;
+            s_preset.roll += WrapPi(gRoll - s_preset.roll) * w;
+            s_preset.aimW += (gAim - s_preset.aimW) * w;
+
+            const float        ce = std::cos(s_preset.el);
+            const RE::NiPoint3 dir{ std::sin(s_preset.az) * ce, std::cos(s_preset.az) * ce, std::sin(s_preset.el) };
+            Pose               p;
+            p.pos = centre + dir * s_preset.dist;
+            if (s_preset.view != 0) KeepAboveFloor(p.pos, haveFloor, floor);  // a saved shot stays where it was put
+            float lookYaw = 0.0f, lookPitch = 0.0f;
+            LookAngles(centre - p.pos, lookYaw, lookPitch);
+            p.yaw   = lookYaw + WrapPi(s_preset.fixYaw - lookYaw) * s_preset.aimW;
+            p.pitch = std::clamp(lookPitch + (s_preset.fixPitch - lookPitch) * s_preset.aimW, -kPitchLimit, kPitchLimit);
+            p.roll  = s_preset.roll;
+            p.fov   = s_preset.fov;
+            WritePose(a_fcs, p, true);
+            CamCollision::Request(centre, "scene preset");
         }
 
         void DriveEye(RE::FreeCameraState* a_fcs, float a_prePitch, float a_preYaw, float a_dt) {
@@ -1518,9 +1804,18 @@ namespace SceneCam {
             std::memcpy(st3.poseKey, st.poseKey, sizeof(st3.poseKey));
             st3.settings = Settings3();
 
+            TFCAM_API::SceneCamPreset4 st4{};
+            st4.size      = sizeof(st4);
+            st4.hasShot   = st.hasStageShot ? 1 : 0;
+            st4.viewCount = kPresetCount + st4.hasShot;
+            st4.view      = st.mode == TFCAM_API::kModePreset ? s_preset.view : -1;
+            st4.placing   = s_placing ? 1 : 0;
+            CopyStr(st4.name, sizeof(st4.name), st4.view >= 0 ? PresetName(st4.view) : "");
+
             std::lock_guard lock(s_statusLock);
             s_status           = st;
             s_status3          = st3;
+            s_status4          = st4;
             s_statusSceneShots = s_cCount;
             s_statusEvent      = s_lastEvent;
         }
@@ -1657,7 +1952,10 @@ namespace SceneCam {
         ServiceAuto(a_fcs);
         switch (s_mode) {
         case TFCAM_API::kModeOrbit:
-            DriveOrbit(a_fcs, dt);
+            DriveOrbit(a_fcs, a_prePitch, dt);
+            break;
+        case TFCAM_API::kModePreset:
+            DrivePreset(a_fcs, dt);
             break;
         case TFCAM_API::kModeEye:
             DriveEye(a_fcs, a_prePitch, a_preYaw, dt);
@@ -1670,20 +1968,45 @@ namespace SceneCam {
     }
 
     bool OwnsMotion() {
-        return s_mode == TFCAM_API::kModeOrbit || s_mode == TFCAM_API::kModeEye || s_blend.active || AmbientCam::OwnsMotion();
+        return s_mode == TFCAM_API::kModeOrbit || s_mode == TFCAM_API::kModeEye || s_mode == TFCAM_API::kModePreset ||
+               s_blend.active || AmbientCam::OwnsMotion();
     }
 
     bool OnWheel(int a_dir) {
         if (s_mode == TFCAM_API::kModeOrbit) {
-            s_cfg.orbitRadius = std::clamp(s_cfg.orbitRadius * (a_dir < 0 ? 0.92f : 1.08f), 30.0f, 500.0f);
+            // 0.15.0: the orbit FOV (the radius moved to Shift + wheel)
+            s_cfg.orbitFOV = std::clamp(s_cfg.orbitFOV + static_cast<float>(a_dir) * FreeCam::GetSettings().fovStep, 20.0f, 120.0f);
         } else if (s_mode == TFCAM_API::kModeEye) {
             s_cfg.eyeFOV = std::clamp(s_cfg.eyeFOV + static_cast<float>(a_dir) * FreeCam::GetSettings().fovStep, 30.0f, 130.0f);
+        } else if (s_mode == TFCAM_API::kModePreset) {
+            StepPresetView(a_dir < 0 ? -1 : 1, "mouse wheel");  // 0.15.0
+            PublishStatus();
+            return true;
         } else {
             return false;
         }
         s_saveAt = Now() + kSaveDebounce;
         ScheduleTick();
         return true;
+    }
+
+    bool OnShiftWheel(int a_dir) {
+        if (s_mode != TFCAM_API::kModeOrbit) return false;
+        s_cfg.orbitRadius = std::clamp(s_cfg.orbitRadius * (a_dir < 0 ? 0.92f : 1.08f), 30.0f, 500.0f);
+        s_saveAt          = Now() + kSaveDebounce;
+        ScheduleTick();
+        return true;
+    }
+
+    bool OnMiddleClick() {
+        if (!s_placing) return false;
+        auto* fcs = FreeCam::TFCamDriving() ? CurrentFreeCam() : nullptr;
+        if (fcs && DoSave("set cam pos")) {
+            s_placing = false;
+            EnterPreset(fcs, "set cam pos saved the shot", 0);
+        }
+        PublishStatus();
+        return true;  // while placing the middle mouse button is never a screenshot
     }
 
     bool OnHotkey(std::uint32_t a_code) {
@@ -1760,8 +2083,16 @@ namespace SceneCam {
                 }
             }
         }
+        if (a_keyChanged && s_mode == TFCAM_API::kModePreset) {
+            // 0.15.0: a new stage with a saved shot shows it (one without falls back to the front view in the drive)
+            ShotContext ctx;
+            if (StageShot(ctx) && s_preset.view != 0) {
+                s_preset.view = 0;
+                Event(std::format("preset view: the saved shot of {}", ctx.key));
+            }
+        }
         if (a_keyChanged) {
-            if (s_cfg.autoStageShots && s_mode == TFCAM_API::kModeFree) {
+            if (s_cfg.autoStageShots && s_mode == TFCAM_API::kModeFree && !s_placing) {
                 s_autoKey   = StageKey(SceneTracker::GetPlayerScene());
                 s_autoUntil = Now() + kAutoWindow;
             } else {
@@ -1788,9 +2119,11 @@ namespace SceneCam {
             s_pending = Req::kNone;
             s_pendingShotKey.clear();
         }
-        if (s_pending == Req::kEye) s_pending = Req::kNone;
+        if (s_pending == Req::kEye || s_pending == Req::kPreset || s_pending == Req::kPlace) s_pending = Req::kNone;
         LeaveEye("the player's scene ended", true);
         LeaveOrbit("the player's scene ended", true);
+        LeavePreset("the player's scene ended", true);
+        EndPlacing("the player's scene ended");
         s_eye.preferred = 0;
         PublishStatus();
     }
@@ -1808,6 +2141,7 @@ namespace SceneCam {
         if (WaitForFreeCam(Req::kFurniture)) return true;
         LeaveOrbit("going to a furniture shot", false);
         LeaveEye("going to a furniture shot", false);
+        LeavePreset("going to a furniture shot", false);
         StartBlend(ReadPose(CurrentFreeCam()), ShotToPose(*shot, ctx), s_cfg.shotBlend);
         Event(std::format("go to shot ({}) {} over {:.1f} s", a_source, ctx.key, s_cfg.shotBlend));
         return true;
@@ -1965,6 +2299,51 @@ namespace SceneCam {
         const bool ok = Snapshot().sceneId[0] != '\0';
         RequestDeleteSceneShots();
         return ok;
+    }
+
+    // ---- TFCamAPI v4 (any thread) ----------------------------------------------------------------------------------
+    bool ApiSetPresetView(std::int32_t a_state) {
+        const auto st = Snapshot();
+        const bool ok = a_state == 0 || (a_state < 0 && st.mode == TFCAM_API::kModePreset) || st.inPlayerScene;
+        OnMain([a_state] {
+            RequestPreset(a_state, "SLUI");
+            PublishStatus();
+        });
+        return ok;
+    }
+
+    bool ApiStepPreset(std::int32_t a_step) {
+        if (a_step == 0) return false;
+        const bool ok = Snapshot().mode == TFCAM_API::kModePreset;
+        OnMain([a_step] {
+            StepPresetView(a_step < 0 ? -1 : 1, "SLUI");
+            PublishStatus();
+        });
+        return ok;
+    }
+
+    bool ApiSetShotPlacing(std::int32_t a_state) {
+        const auto st = Snapshot();
+        const bool ok = a_state == 0 || (st.inPlayerScene && st.stageKnown);
+        OnMain([a_state] {
+            RequestPlacing(a_state, "SLUI");
+            PublishStatus();
+        });
+        return ok;
+    }
+
+    bool ApiGetPreset4(TFCAM_API::SceneCamPreset4* a_out) {
+        if (!a_out || a_out->size != sizeof(TFCAM_API::SceneCamPreset4)) return false;
+        std::lock_guard lock(s_statusLock);
+        if (s_status4.size == 0) {  // nothing published yet
+            *a_out           = TFCAM_API::SceneCamPreset4{};
+            a_out->view      = -1;
+            a_out->viewCount = kPresetCount;
+        } else {
+            *a_out = s_status4;
+        }
+        a_out->size = sizeof(TFCAM_API::SceneCamPreset4);
+        return true;
     }
 
     MenuStatus GetMenuStatus() {

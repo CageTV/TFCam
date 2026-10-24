@@ -12,11 +12,14 @@
 //     with the free-camera state and the scene's shot count, delete every shot of the scene.
 //     ITFCam3 extends ITFCam2 (single inheritance: the v1 / v2 parts of the vtable are unchanged).
 //     The v2 structs stay as they were; v3 has its own, each with a size field.
+// v4 (TFCam 0.15.0): preset views round the player's SexLab scene (10 built-in angles, the stage's
+//     saved shot first) and "set cam pos" (fly the camera, the middle mouse button saves the
+//     stage's shot). ITFCam4 extends ITFCam3; the status structs are unchanged (mode 4 = preset).
 //
 //   auto* dll = GetModuleHandleW(L"TFCam.dll");
 //   auto  fn  = dll ? reinterpret_cast<TFCAM_API::RequestFn>(GetProcAddress(dll, "RequestTFCamAPI")) : nullptr;
-//   auto* api = fn ? static_cast<TFCAM_API::ITFCam3*>(fn(TFCAM_API::kVersion3)) : nullptr;
-//   // nullptr from an older TFCam: ask for kVersion2 and use ITFCam2.
+//   auto* api = fn ? static_cast<TFCAM_API::ITFCam4*>(fn(TFCAM_API::kVersion4)) : nullptr;
+//   // nullptr from an older TFCam: ask for kVersion3 / kVersion2 and use ITFCam3 / ITFCam2.
 //
 // Older TFCam builds have no export or return nullptr for an unknown version. Plain types only.
 // This header is copied verbatim into consumers (SLUI include/TFCamAPI.h): change both together.
@@ -25,6 +28,7 @@ namespace TFCAM_API
     inline constexpr std::uint32_t kVersion1 = 1;
     inline constexpr std::uint32_t kVersion2 = 2;
     inline constexpr std::uint32_t kVersion3 = 3;
+    inline constexpr std::uint32_t kVersion4 = 4;
 
     using SnapHandler = void (*)();
 
@@ -42,6 +46,7 @@ namespace TFCAM_API
         kModeFree = 1,   // normal TFCam free-fly (saved shots jump here and leave you flying)
         kModeOrbit = 2,  // auto orbit round the scene actors / posed actor / player
         kModeEye = 3,    // partner eye view (player SexLab scene only)
+        kModePreset = 4, // v4: preset views round the player's SexLab scene (reported by v4 TFCam only)
     };
 
     // Persisted in TFCam.ini [SceneCam]. Values outside the ranges are clamped by TFCam.
@@ -152,6 +157,36 @@ namespace TFCAM_API
         virtual bool GetStatus3(SceneCamStatus3* a_out) noexcept = 0;
         // Deletes every saved stage shot of the player's current scene (all stages and slots).
         virtual bool DeleteSceneShots() noexcept = 0;
+    };
+
+    // ---- v4 ------------------------------------------------------------------------------------
+    // Preset view state for UIs. Caller sets size = sizeof(SceneCamPreset4) before calling GetPreset4.
+    struct SceneCamPreset4
+    {
+        std::uint32_t size;
+        std::int32_t view;      // the view shown: 0 = the stage's saved shot, 1..10 = built-in views, -1 = preset view off
+        std::int32_t viewCount; // views to step through: 11 with a saved shot for this stage, else 10
+        std::int32_t hasShot;   // the current stage has a saved shot (view 0)
+        std::int32_t placing;   // 1 = "set cam pos" is on: free-fly, the middle mouse button saves the stage's shot
+        char name[32];          // the view's name ("Saved shot", "Front", "Top", ...), "" when off
+    };
+
+    // Same threading and return rules as ITFCam2.
+    struct ITFCam4 : ITFCam3
+    {
+        // a_state: 0 = off, 1 = on, -1 = toggle. Player SexLab scene only; enters free-fly first. It
+        // starts on the stage's saved shot when there is one, else on the front view; a new stage
+        // goes to its saved shot (or from a saved shot back to the front view).
+        virtual bool SetPresetView(std::int32_t a_state) noexcept = 0;
+        // a_step +1 / -1: the next / previous view (wraps). Preset view only. The mouse wheel does
+        // the same while preset view is on and no menu is open.
+        virtual bool StepPreset(std::int32_t a_step) noexcept = 0;
+        // a_state: 1 = "set cam pos" (leaves orbit / eye / preset view for plain free-fly; the
+        // middle mouse button then saves the camera as this stage's shot instead of a screenshot,
+        // and preset view comes on showing it), 0 = cancel, -1 = toggle. Player SexLab scene only.
+        virtual bool SetShotPlacing(std::int32_t a_state) noexcept = 0;
+        // Thread-safe snapshot. false (and *a_out untouched) if a_out is null or a_out->size != sizeof(SceneCamPreset4).
+        virtual bool GetPreset4(SceneCamPreset4* a_out) noexcept = 0;
     };
 
     using RequestFn = void* (*)(std::uint32_t a_version);

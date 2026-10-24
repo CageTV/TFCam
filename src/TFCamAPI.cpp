@@ -9,9 +9,10 @@
 // arguments into an SKSE task (SceneCam does the engine work on the main thread); GetStatus reads a snapshot.
 // 0.13.0: v3 = ITFCam3 (orbit aim / sway / target, automatic free camera for saved shots, status with the free-camera
 // state, delete the scene's shots). Still one object: RequestTFCamAPI(1) / (2) return the same pointer as before.
+// 0.15.0: v4 = ITFCam4 (preset views, set cam pos). Same object again.
 namespace
 {
-    class TFCamAPIImpl final : public TFCAM_API::ITFCam3
+    class TFCamAPIImpl final : public TFCAM_API::ITFCam4
     {
     public:
         void SetSnapHandler(TFCAM_API::SnapHandler a_handler) noexcept override
@@ -91,6 +92,26 @@ namespace
             return Guard([] { return SceneCam::ApiDeleteSceneShots(); });
         }
 
+        bool SetPresetView(std::int32_t a_state) noexcept override
+        {
+            return Guard([&] { return SceneCam::ApiSetPresetView(a_state); });
+        }
+
+        bool StepPreset(std::int32_t a_step) noexcept override
+        {
+            return Guard([&] { return SceneCam::ApiStepPreset(a_step); });
+        }
+
+        bool SetShotPlacing(std::int32_t a_state) noexcept override
+        {
+            return Guard([&] { return SceneCam::ApiSetShotPlacing(a_state); });
+        }
+
+        bool GetPreset4(TFCAM_API::SceneCamPreset4* a_out) noexcept override
+        {
+            return Guard([&] { return SceneCam::ApiGetPreset4(a_out); });
+        }
+
     private:
         // Nothing may leave a noexcept call into another DLL (a failed task allocation would otherwise terminate).
         template <class F>
@@ -117,6 +138,8 @@ extern "C" __declspec(dllexport) void* RequestTFCamAPI(std::uint32_t a_version)
         return static_cast<TFCAM_API::ITFCam2*>(&g_api);
     case TFCAM_API::kVersion3:
         return static_cast<TFCAM_API::ITFCam3*>(&g_api);
+    case TFCAM_API::kVersion4:
+        return static_cast<TFCAM_API::ITFCam4*>(&g_api);
     default:
         return nullptr;
     }

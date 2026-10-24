@@ -12,6 +12,12 @@
 //           smoothed centre of their torsos. WASD / mouse do nothing; the mouse wheel changes the radius.
 //   Eye   - looks out of a scene partner's eyes (player SexLab scene only). The mouse looks around (+-85 degrees),
 //           the partner's head is hidden and the near clip pulled in while it lasts.
+//   Preset - 0.15.0: fixed views round the player's SexLab scene - the stage's saved shot first (when there is one),
+//           then 10 built-in angles (front, the sides, back, top, low) relative to the player's heading. The mouse
+//           wheel steps through them. "Set cam pos" leaves for plain free-fly; the middle mouse button then saves the
+//           camera as the stage's shot (instead of a screenshot) and preset view comes back on it.
+// 0.15.0 orbit: the mouse wheel is the orbit FOV, Shift + wheel the radius, and the mouse's up / down tilts the orbit
+// (camera up to a straight top view, down to looking up from below - never under the scene's floor).
 // Saved shots (SceneShots.h) are kept per scene stage + the player's slot, and per pose (SLUI tells TFCam which
 // pose plays through ITFCam2::SetActivePose).
 // 0.13.0: with autoEnterShots a stage (or an NPC pose) that has a saved shot turns TFCam free-fly on by itself, once per
@@ -56,7 +62,9 @@ namespace SceneCam {
     // FreeCamController
     void Drive(RE::FreeCameraState* a_fcs, float a_prePitch, float a_preYaw, bool a_driving);  // Update hook, after vanilla
     bool OwnsMotion();                    // orbit / eye view / a blend moves the camera (menu restore + drive stand down)
-    bool OnWheel(int a_dir);              // -1 wheel up, +1 wheel down; true = used (orbit radius / eye FOV)
+    bool OnWheel(int a_dir);              // -1 wheel up, +1 wheel down; true = used (orbit / eye FOV, preset step)
+    bool OnShiftWheel(int a_dir);         // 0.15.0: Shift + wheel; true = used (orbit radius)
+    bool OnMiddleClick();                 // 0.15.0: middle mouse, no menu open; true = "set cam pos" saved / used it
     bool OnHotkey(std::uint32_t a_code);  // keyboard key-down, no menu open; true = a Scene Camera key, consume it
     void OnFreeCamEnd();                  // main thread, before the vanilla End's FOV write-back
     void NoteOwnLeave();                  // right before TFCam itself leaves its free-fly: that End is not the user's
@@ -88,6 +96,12 @@ namespace SceneCam {
     void ApiSetSettings3(const TFCAM_API::SceneCamSettings3& a_settings);
     bool ApiGetStatus3(TFCAM_API::SceneCamStatus3* a_out);
     bool ApiDeleteSceneShots();
+
+    // TFCamAPI v4 (any thread)
+    bool ApiSetPresetView(std::int32_t a_state);
+    bool ApiStepPreset(std::int32_t a_step);
+    bool ApiSetShotPlacing(std::int32_t a_state);
+    bool ApiGetPreset4(TFCAM_API::SceneCamPreset4* a_out);
 
     // SKSE Menu Framework page (any thread)
     struct MenuStatus {

@@ -1373,6 +1373,8 @@ namespace FreeCam {
                             // Shift+MMB freeze only when no keyboard key is bound
                             FreezeTime::Toggle();
                             SKSE::log::info("Freeze toggled via Shift+MMB");
+                        } else if (!shiftHeld && SceneCam::OnMiddleClick()) {
+                            // 0.15.0: "set cam pos" saved the stage's shot - no screenshot
                         } else if (!shiftHeld && s_settings.screenshotKey == 0) {
                             // MMB screenshot only when no keyboard key is bound
                             TakeScreenshot("MMB");
@@ -1382,10 +1384,14 @@ namespace FreeCam {
                     // 0.7.7: plain wheel = FOV only while TFCam drives; under SLCC the wheel is SLCC's zoom.
                     // 0.10.0: while the Scene Camera orbits, the wheel is the orbit radius (8% a notch); in eye view
                     // it is the eye-view FOV (the drive writes that FOV every frame).
+                    // 0.15.0: orbit: the wheel is the orbit FOV and Shift + wheel the radius; preset view: the wheel
+                    // steps the views.
                     if (code == RE::BSWin32MouseDevice::Key::kWheelUp) {
                         bool shiftHeld = (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0;
                         const bool ctrlHeld = (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0;
-                        if (shiftHeld) {
+                        if (shiftHeld && driving && SceneCam::OnShiftWheel(-1)) {
+                            // orbit radius
+                        } else if (shiftHeld) {
                             CameraLight::ScrollUp();
                         } else if (ctrlHeld && driving) {
                             AdjustFlySpeed(+1);  // 0.14.0: Ctrl + wheel = fly speed
@@ -1399,7 +1405,9 @@ namespace FreeCam {
                     else if (code == RE::BSWin32MouseDevice::Key::kWheelDown) {
                         bool shiftHeld = (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0;
                         const bool ctrlHeld = (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0;
-                        if (shiftHeld) {
+                        if (shiftHeld && driving && SceneCam::OnShiftWheel(1)) {
+                            // orbit radius
+                        } else if (shiftHeld) {
                             CameraLight::ScrollDown();
                         } else if (ctrlHeld && driving) {
                             AdjustFlySpeed(-1);

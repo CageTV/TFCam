@@ -724,8 +724,9 @@ namespace FreeCamMenu {
         // Status (a snapshot the game updates every frame while something is going on).
         const auto  ms = SceneCam::GetMenuStatus();
         const auto& st = ms.status;
-        static const char* modeNames[] = { "Off (TFCam is not driving a free camera)", "Free-fly", "Orbit", "Eye view" };
-        ImGuiMCP::Text("Mode: %s", modeNames[st.mode <= 3 ? st.mode : 0]);
+        static const char* modeNames[] = { "Off (TFCam is not driving a free camera)", "Free-fly", "Orbit", "Eye view",
+            "Preset view" };
+        ImGuiMCP::Text("Mode: %s", modeNames[st.mode <= 4 ? st.mode : 0]);
         if (st.inPlayerScene) {
             ImGuiMCP::Text("In your SexLab scene: yes, %u partner(s)", st.partnerCount);
             if (st.stageKnown) {
@@ -785,7 +786,8 @@ namespace FreeCamMenu {
         ImGuiMCP::TextColored({ 0.5f, 0.5f, 0.5f, 1.0f },
             "A negative speed orbits the other way. Aim height moves the point the orbit circles and looks at up or down "
             "(the tilt stays the angle the camera looks down at). Sway: how far the tilt slowly rises and falls (0 = "
-            "none). Mouse wheel while orbiting: radius. WASD and the mouse do nothing.");
+            "none). While orbiting: mouse wheel = FOV, Shift + wheel = radius, mouse up / down tilts the orbit (up to a "
+            "top view, down to looking up from below, never under the floor). WASD does nothing.");
 
         ImGuiMCP::SeparatorText("Eye view");
         ImGuiMCP::SetNextItemWidth(200.0f);
