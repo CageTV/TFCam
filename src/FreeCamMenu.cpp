@@ -277,6 +277,7 @@ namespace FreeCamMenu {
         WriteINIFloat("Idle", "fReturnTime", a.returnTime);
         WriteINIFloat("Idle", "fInteriorScale", a.interiorScale);
         WriteINIFloat("Idle", "fDollyFraming", a.dollyFraming);
+        WriteINIFloat("Idle", "fDollyMinDistance", a.dollyMinDist);
         WriteINIFloat("Idle", "fDollyNarrowFOV", a.dollyNarrowFOV);
         WriteINIFloat("Idle", "fDollyWideFOV", a.dollyWideFOV);
         WriteINIFloat("Idle", "fDollyPeriod", a.dollyPeriod);
@@ -890,6 +891,8 @@ namespace FreeCamMenu {
         ImGuiMCP::SetNextItemWidth(200.0f);
         changed |= ImGuiMCP::SliderFloat("Framing (units visible at you)##amFrame", &a.dollyFraming, 40.0f, 400.0f, "%.0f");
         ImGuiMCP::SetNextItemWidth(200.0f);
+        changed |= ImGuiMCP::SliderFloat("Closest distance to you##amMinDist", &a.dollyMinDist, 40.0f, 300.0f, "%.0f");
+        ImGuiMCP::SetNextItemWidth(200.0f);
         changed |= ImGuiMCP::SliderFloat("Narrow FOV (camera far)##amNarrow", &a.dollyNarrowFOV, 10.0f, 60.0f, "%.0f");
         ImGuiMCP::SetNextItemWidth(200.0f);
         changed |= ImGuiMCP::SliderFloat("Wide FOV (camera close)##amWide", &a.dollyWideFOV, 50.0f, 130.0f, "%.0f");
@@ -1154,6 +1157,7 @@ namespace FreeCamMenu {
             a.returnTime      = readFloat("Idle", "fReturnTime", d.returnTime);
             a.interiorScale   = readFloat("Idle", "fInteriorScale", d.interiorScale);
             a.dollyFraming    = readFloat("Idle", "fDollyFraming", d.dollyFraming);
+            a.dollyMinDist    = readFloat("Idle", "fDollyMinDistance", d.dollyMinDist);
             a.dollyNarrowFOV  = readFloat("Idle", "fDollyNarrowFOV", d.dollyNarrowFOV);
             a.dollyWideFOV    = readFloat("Idle", "fDollyWideFOV", d.dollyWideFOV);
             a.dollyPeriod     = readFloat("Idle", "fDollyPeriod", d.dollyPeriod);

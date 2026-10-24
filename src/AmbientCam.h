@@ -39,6 +39,7 @@ namespace AmbientCam {
         float interiorScale   = 0.6f;    // radii / distances in interior cells
         // dolly zoom
         float dollyFraming    = 110.0f;  // game units visible (vertically) at the subject
+        float dollyMinDist    = 90.0f;   // 0.15.1: never closer than this to the face; the wide FOV is capped to keep the framing
         float dollyNarrowFOV  = 28.0f;
         float dollyWideFOV    = 85.0f;
         float dollyPeriod     = 9.0f;    // seconds for one in-and-out

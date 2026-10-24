@@ -350,15 +350,19 @@ namespace AmbientCam {
             // Keep the exact dolly relation but never farther than maxDist: raise the narrow end instead.
             const float minFov = 2.0f * std::atan(framing / (2.0f * maxDist)) / kDegToRad;
             const float narrow = (std::max)(s_cfg.dollyNarrowFOV, minFov);
-            const float wide   = (std::max)(s_cfg.dollyWideFOV, narrow + 5.0f);
-            const float fov    = narrow + (wide - narrow) * phase;
-            const float dist   = framing / (2.0f * std::tan(0.5f * fov * kDegToRad));
+            // 0.15.1: the close end stops at dollyMinDist (the near plane and the body's edge stayed in view when the camera
+            // came to 60 units at FOV 85): the wide FOV is the one that gives that distance for this framing. Interiors scale it.
+            const float minDist = s_cfg.dollyMinDist * scale;
+            const float capFov  = 2.0f * std::atan(framing / (2.0f * minDist)) / kDegToRad;
+            const float wide    = (std::max)((std::min)(s_cfg.dollyWideFOV, capFov), narrow + 5.0f);
+            const float fov     = narrow + (wide - narrow) * phase;
+            const float dist    = (std::max)(framing / (2.0f * std::tan(0.5f * fov * kDegToRad)), minDist);
 
             // 0.11.1: low near the ground, tilted up at the face while it circles. When it is too close to stay that low,
             // it rises just enough to keep the distance, so the dolly relation stays exact.
             const RE::NiPoint3 face     = Mix(s_subj.pelvis, s_subj.head, 0.97f);
             const float        az       = az0 + s_cfg.dollySpin * kDegToRad * t;
-            const float        minHoriz = 0.35f * dist;
+            const float        minHoriz = (std::max)(0.35f * dist, 0.7f * minDist);  // 0.15.1: and clear of the body's side
             float              dz       = (s_subj.feet.z + s_cfg.dollyCamHeight) - face.z;  // < 0: below the face
             float              horiz    = minHoriz;
             if (dist * dist - dz * dz >= minHoriz * minHoriz) {
@@ -1035,6 +1039,7 @@ namespace AmbientCam {
         range(s_cfg.returnTime, 0.0f, 3.0f, 0.7f);
         range(s_cfg.interiorScale, 0.3f, 1.0f, 0.6f);
         range(s_cfg.dollyFraming, 40.0f, 400.0f, 110.0f);
+        range(s_cfg.dollyMinDist, 40.0f, 300.0f, 90.0f);
         range(s_cfg.dollyNarrowFOV, 10.0f, 60.0f, 28.0f);
         range(s_cfg.dollyWideFOV, 50.0f, 130.0f, 85.0f);
         range(s_cfg.dollyPeriod, 2.0f, 30.0f, 9.0f);
