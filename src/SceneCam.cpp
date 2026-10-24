@@ -51,6 +51,7 @@ namespace SceneCam {
         constexpr float  kOrbitElMax     = 85.0f * kDegToRad;  // ... to a top view (the vanilla pitch clamp stays clear)
         constexpr float  kFloorMargin    = 12.0f;              // 0.15.0: orbit / preset camera at least this above the floor
         constexpr float  kPresetHalfLife = 0.3f;               // 0.15.0: preset view chase (a new view, a new stage)
+        constexpr float  kOrbitTiltSens  = 0.0007f;            // 0.15.0: orbit tilt, radians per raw mouse unit
 
         Config s_cfg;
 
@@ -291,6 +292,7 @@ namespace SceneCam {
         };
         PresetState s_preset;
         bool        s_placing = false;  // 0.15.0 "set cam pos": the middle mouse button saves the stage's shot
+        float       s_mouseDY = 0.0f;   // 0.15.0: raw mouse Y since the last orbit frame (OnMouseMove)
 
         // Azimuth round from the player's front (+ = her right), elevation above the centre, distance, FOV.
         struct PresetDef {
@@ -961,6 +963,7 @@ namespace SceneCam {
             s_orbit.pitch0   = cur.pitch;
             s_orbit.entryFOV = fromEye && preEyeFOV > 0.0f ? preEyeFOV : (fromPreset && prePresetFOV > 0.0f ? prePresetFOV : cur.fov);
             s_orbit.aim      = s_cfg.orbitAim;
+            s_mouseDY        = 0.0f;
             s_mode           = TFCAM_API::kModeOrbit;
             s_autoOwnsFree   = false;  // the user took this free camera over: it stays on when an NPC pose ends
 
@@ -1554,7 +1557,14 @@ namespace SceneCam {
             if (a_haveFloor && a_pos.z < a_floor + kFloorMargin) a_pos.z = a_floor + kFloorMargin;
         }
 
-        void DriveOrbit(RE::FreeCameraState* a_fcs, float a_prePitch, float a_dt) {
+        // The game's "Invert Y Axis" (the orbit tilt follows it like the normal look).
+        bool InvertY() {
+            auto* prefs = RE::INIPrefSettingCollection::GetSingleton();
+            auto* s     = prefs ? prefs->GetSetting("bInvertYValues:Controls") : nullptr;
+            return s && s->data.b;
+        }
+
+        void DriveOrbit(RE::FreeCameraState* a_fcs, float a_dt) {
             RE::NiPoint3 raw{};
             float        floor     = 0.0f;
             const bool   haveFloor = OrbitTargetRaw(raw, nullptr, s_cfg.orbitTarget == 1, &floor);
@@ -1565,13 +1575,16 @@ namespace SceneCam {
             s_orbit.az     = WrapPi(s_orbit.az + s_cfg.orbitSpeed * kDegToRad * a_dt);
             // Breathing: +-orbitSway degrees (0.13.0; was a fixed 8) over three orbit periods.
             s_orbit.breath = std::fmod(s_orbit.breath + a_dt * std::fabs(s_cfg.orbitSpeed) / 3.0f, 360.0f);
-            // 0.15.0 mouse tilt: what the vanilla Update pitched this frame (the user's mouse / stick look) moves the
-            // orbit the same way the view turned - looking down raises the camera (to a top view), looking up lowers
-            // it (to looking up from below). Never under the floor: the tilt stops there instead of winding up.
+            // 0.15.0 mouse tilt: the raw mouse Y moves the orbit the way the view would turn - mouse down (looking
+            // down) raises the camera to a top view, mouse up lowers it to looking up from below. Raw mouse, not what
+            // the vanilla Update pitched: the vanilla free camera clamps its own pitch, and near a top / bottom view
+            // that clamp read as mouse movement and threw the orbit to the top. Never under the floor: the tilt stops
+            // there instead of winding up.
             const float base =
                 std::clamp(s_cfg.orbitHeight + s_cfg.orbitSway * std::sin(s_orbit.breath * kDegToRad), -85.0f, 85.0f) *
                 kDegToRad;
-            if (const float dPitch = a_fcs->rotation.x - a_prePitch; std::isfinite(dPitch)) s_orbit.tilt += dPitch;
+            const float dy = std::exchange(s_mouseDY, 0.0f);
+            if (std::isfinite(dy)) s_orbit.tilt += (InvertY() ? -dy : dy) * kOrbitTiltSens;
             float lo = kOrbitElMin;
             if (haveFloor && s_orbit.dist > 1.0f) {
                 const float centreZ = s_orbit.target.z + s_orbit.aim;
@@ -1952,7 +1965,7 @@ namespace SceneCam {
         ServiceAuto(a_fcs);
         switch (s_mode) {
         case TFCAM_API::kModeOrbit:
-            DriveOrbit(a_fcs, a_prePitch, dt);
+            DriveOrbit(a_fcs, dt);
             break;
         case TFCAM_API::kModePreset:
             DrivePreset(a_fcs, dt);
@@ -1988,6 +2001,10 @@ namespace SceneCam {
         s_saveAt = Now() + kSaveDebounce;
         ScheduleTick();
         return true;
+    }
+
+    void OnMouseMove(float a_dy) {
+        if (s_mode == TFCAM_API::kModeOrbit) s_mouseDY += a_dy;
     }
 
     bool OnShiftWheel(int a_dir) {

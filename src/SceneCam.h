@@ -64,6 +64,7 @@ namespace SceneCam {
     bool OwnsMotion();                    // orbit / eye view / a blend moves the camera (menu restore + drive stand down)
     bool OnWheel(int a_dir);              // -1 wheel up, +1 wheel down; true = used (orbit / eye FOV, preset step)
     bool OnShiftWheel(int a_dir);         // 0.15.0: Shift + wheel; true = used (orbit radius)
+    void OnMouseMove(float a_dy);         // 0.15.0: raw mouse Y (TFCam's input sink, a free camera on): orbit tilt
     bool OnMiddleClick();                 // 0.15.0: middle mouse, no menu open; true = "set cam pos" saved / used it
     bool OnHotkey(std::uint32_t a_code);  // keyboard key-down, no menu open; true = a Scene Camera key, consume it
     void OnFreeCamEnd();                  // main thread, before the vanilla End's FOV write-back

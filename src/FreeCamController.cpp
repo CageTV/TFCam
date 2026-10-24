@@ -1197,6 +1197,10 @@ namespace FreeCam {
             if (active) UpdateFrameTimer();
 
             for (auto* evt = *a_events; evt; evt = evt->next) {
+                // 0.15.0: the raw mouse Y for the Scene Camera's orbit tilt (the event still goes on as before)
+                if (driving && evt->GetEventType() == RE::INPUT_EVENT_TYPE::kMouseMove) {
+                    SceneCam::OnMouseMove(static_cast<float>(static_cast<RE::MouseMoveEvent*>(evt)->mouseInputY));
+                }
                 // --Claude: accumulate mouse movement for the dialogue free-cam
                 // look. Consumed+cleared each frame by the Update hook (only
                 // applied while the hold-to-look key is down).
