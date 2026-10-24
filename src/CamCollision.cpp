@@ -26,7 +26,7 @@ namespace CamCollision {
         RE::NiPoint3 s_pivot{};
         const char*  s_who = "";
 
-        float  s_comp      = 0.0f;  // how far the camera is pulled in now (units)
+        RE::NiPoint3 s_off{};  // 0.15.2: how far the camera is moved off what the driver wrote (slid along walls), now
         double s_holdUntil = 0.0;
 
         // Log / menu.
@@ -108,6 +108,7 @@ namespace CamCollision {
             float         dist  = 0.0f;  // from the ray start
             RE::FormID    ref   = 0;
             int           layer = -1;
+            RE::NiPoint3  normal{};  // 0.15.2: the surface normal at the hit
         };
 
         // First solid hit on the way from a_from to a_to. Characters and anything right at the start are passed through.
@@ -138,7 +139,75 @@ namespace CamCollision {
                 out.dist  = frac * len;
                 out.ref   = ref ? ref->GetFormID() : 0;
                 out.layer = static_cast<int>(layer);
+                out.normal = { pick.rayOutput.normal.quad.m128_f32[0], pick.rayOutput.normal.quad.m128_f32[1],
+                    pick.rayOutput.normal.quad.m128_f32[2] };
                 return out;
+            }
+            return out;
+        }
+
+        float Dot(const RE::NiPoint3& a, const RE::NiPoint3& b) { return a.x * b.x + a.y * b.y + a.z * b.z; }
+
+        struct Solved {
+            RE::NiPoint3 pos;
+            Hit          nearest;
+            bool         moved = false;
+        };
+
+        // 0.15.2: where the camera may be. A wall between the look point and the camera does not pull the camera toward the
+        // look point: the camera is pushed out along the wall's normal to a_margin in front of its plane, so the move along the
+        // wall carries on (a slide) and the camera does not dip in and swing back out as it passes. Up to 4 rounds (a corner is
+        // two walls); when a hit has no usable plane, or the line is still blocked after the rounds, it pulls in along the line.
+        Solved Solve(RE::bhkWorld* a_world, const RE::NiPoint3& a_pivot, const RE::NiPoint3& a_cam, const RE::NiPoint3& a_side,
+            float a_r, float a_margin) {
+            Solved out;
+            out.pos                      = a_cam;
+            const RE::NiPoint3 offsets[] = { { 0.0f, 0.0f, 0.0f }, a_side * a_r, a_side * (-a_r) };
+            for (int round = 0; round < 4; ++round) {
+                RE::NiPoint3 bestPush{};
+                float        bestLen = 0.0f;
+                Hit          bestHit;
+                for (const auto& o : offsets) {
+                    const RE::NiPoint3 from = a_pivot + o;
+                    const RE::NiPoint3 to   = out.pos + o;
+                    const Hit          h    = Cast(a_world, from, to);
+                    if (!h.hit) continue;
+                    const RE::NiPoint3 rd  = to - from;
+                    const float        len = Len(rd);
+                    if (!(len > 1.0f)) continue;
+                    RE::NiPoint3 push{};
+                    if (const float nl = Len(h.normal); nl > 0.5f) {
+                        RE::NiPoint3 n = h.normal * (1.0f / nl);
+                        if (Dot(n, rd) > 0.0f) n = n * -1.0f;  // face the look point
+                        const RE::NiPoint3 hitPt = from + rd * (h.dist / len);
+                        const float        need  = a_margin - Dot(to - hitPt, n);
+                        if (need > 0.1f && need <= len) push = n * need;
+                    }
+                    if (Len(push) < 0.1f) {  // no usable plane: pull in along the ray
+                        const float allowed = (std::max)(h.dist - a_margin, (std::min)(kMinDist, len));
+                        push                = rd * (-(len - allowed) / len);
+                    }
+                    if (const float pl = Len(push); pl > bestLen) {
+                        bestLen = pl;
+                        bestPush = push;
+                        bestHit  = h;
+                    }
+                }
+                if (bestLen < 0.25f) break;
+                out.pos     = out.pos + bestPush;
+                out.moved   = true;
+                out.nearest = bestHit;
+            }
+            if (out.moved) {  // the centre line must be clear in the end
+                const Hit h = Cast(a_world, a_pivot, out.pos);
+                if (h.hit) {
+                    const RE::NiPoint3 rd  = out.pos - a_pivot;
+                    const float        len = Len(rd);
+                    if (len > kMinDist) {
+                        out.pos     = a_pivot + rd * ((std::max)(h.dist - a_margin, kMinDist) / len);
+                        out.nearest = h;
+                    }
+                }
             }
             return out;
         }
@@ -172,7 +241,7 @@ namespace CamCollision {
         const bool  req = s_req;
         s_req           = false;
         if (!req || !a_fcs || !a_driving || !s_cfg.enabled) {
-            s_comp = 0.0f;
+            s_off = {};
             return;
         }
         auto* player = RE::PlayerCharacter::GetSingleton();
@@ -184,16 +253,16 @@ namespace CamCollision {
         const RE::NiPoint3 v   = cam - s_pivot;
         const float        d   = Len(v);
         if (!(d > kMinDist) || !std::isfinite(d)) {
-            s_comp = 0.0f;
+            s_off = {};
             return;
         }
         const RE::NiPoint3 dir = v * (1.0f / d);
 
-        // 0.15.1: the camera line plus one tube either side of it, level with it and as far out as the near plane's corners
-        // reach, so the near plane stays out of a wall the camera passes beside. The side rays run parallel to the camera line
-        // (not as a wedge from the look point): a wall beside the subject, or one the camera only passes along, does not count -
-        // only a wall that stands between the look point and the camera does. No probes above / below: the spiral's floor-level
-        // shots would hit the floor with them.
+        // The camera line plus one tube either side of it, level with it and as far out as the near plane's corners reach,
+        // so the near plane stays out of a wall the camera passes beside. The side rays run parallel to the camera line (not
+        // as a wedge from the look point): a wall beside the subject, or one the camera only passes along, does not count -
+        // only a wall that stands between the look point and the camera does. No probes above / below: the spiral's
+        // floor-level shots would hit the floor with them.
         RE::NiPoint3 side{ dir.y, -dir.x, 0.0f };
         if (const float sl = Len(side); sl > 0.01f) {
             side = side * (1.0f / sl);
@@ -205,48 +274,56 @@ namespace CamCollision {
         const float r        = std::clamp(reach, s_cfg.margin * kProbeFrac, kMaxSide);
         // The camera body is kept at least the near clip (plus a hand) off the wall as well.
         const float margin = (std::max)(s_cfg.margin, nearClip + 4.0f);
-        struct Probe {
-            RE::NiPoint3 from, to;
-        };
-        const Probe probes[] = { { s_pivot, cam }, { s_pivot + side * r, cam + side * r }, { s_pivot - side * r, cam - side * r } };
 
-        Hit   nearest;
-        float allowed = d;
-        for (const auto& probe : probes) {
-            const Hit h = Cast(world, probe.from, probe.to);
-            if (!h.hit) continue;
-            const float a = (std::max)(h.dist - margin, (std::min)(kMinDist, d));  // the side rays are as long as the centre one
-            if (a < allowed) {
-                allowed = a;
-                nearest = h;
-            }
-        }
-        const float  need = (std::max)(d - allowed, 0.0f);
-        const double now  = Now();
-        if (need >= s_comp) {
-            if (need > 0.5f && s_comp <= 0.5f && now >= s_nextLog) {
+        const Solved       sol    = Solve(world, s_pivot, cam, side, r, margin);
+        const RE::NiPoint3 target = sol.pos - cam;
+        const float        tl     = Len(target);
+        const float        ol     = Len(s_off);
+        const double       now    = Now();
+        const RE::NiPoint3 diff   = target - s_off;
+        if (tl >= ol - 0.01f) {
+            if (tl > 0.5f && ol <= 0.5f && now >= s_nextLog) {
                 s_nextLog = now + 0.5;
-                const auto text = std::format("{}: pulled in {:.0f} of {:.0f} units by {:08X} (layer {}, side probes {:.0f}, kept {:.0f})",
-                    s_who, need, d, nearest.ref, nearest.layer, r, margin);
+                const auto text = std::format("{}: moved {:.0f} units off the wall of {:08X} (layer {}, side probes {:.0f}, kept {:.0f}, camera {:.0f} from the look point)",
+                    s_who, tl, sol.nearest.ref, sol.nearest.layer, r, margin, d);
                 SKSE::log::info("CamCollision: {}", text);
                 NotePush(text);
             }
-            if (need > s_comp) {
-                // 0.15.1: ease in instead of snapping. How far the camera may trail the wall is capped (the cushion), so it
-                // never gets nearer the wall than half the kept distance, however fast it moves into it.
-                const float cushion = (std::max)(margin * 0.5f, kMinCushion);
-                s_comp = s_cfg.approachSec <= 0.01f
-                    ? need
-                    : (std::max)(s_comp + (need - s_comp) * ExpWeight(dt, s_cfg.approachSec / 4.32f), need - cushion);
-                s_comp = (std::min)(s_comp, need);
+            // Ease in instead of snapping. How far the camera may trail the wall is capped (the cushion), so it never gets
+            // nearer the wall than half the kept distance, however fast it moves into it.
+            if (s_cfg.approachSec <= 0.01f) {
+                s_off = target;
+            } else {
+                s_off = s_off + diff * ExpWeight(dt, s_cfg.approachSec / 4.32f);
+                const RE::NiPoint3 rem = target - s_off;
+                const float        rl  = Len(rem);
+                const float        cushion = (std::max)(margin * 0.5f, kMinCushion);
+                if (rl > cushion) s_off = target - rem * (cushion / rl);
             }
             s_holdUntil = now + kHoldSec;
         } else if (now >= s_holdUntil) {
-            s_comp = need + (s_comp - need) * (1.0f - ExpWeight(dt, s_cfg.returnSec / 4.32f));
+            s_off = s_off + diff * ExpWeight(dt, s_cfg.returnSec / 4.32f);
         }
-        if (s_comp > 0.05f) {
-            const float dist   = (std::max)(d - s_comp, (std::min)(kMinDist, d));
-            a_fcs->translation = s_pivot + dir * dist;
+
+        if (Len(s_off) > 0.05f) {
+            const RE::NiPoint3 np = cam + s_off;
+            // Keep looking at the same point from the new spot, so the subject stays where the driver framed it.
+            auto angles = [](const RE::NiPoint3& dv, float& yaw, float& pitch) {
+                yaw   = std::atan2(dv.x, dv.y);
+                pitch = std::atan2(-dv.z, std::hypot(dv.x, dv.y));
+            };
+            float y0 = 0, p0 = 0, y1 = 0, p1 = 0;
+            angles(s_pivot - cam, y0, p0);
+            angles(s_pivot - np, y1, p1);
+            constexpr float kPi = 3.14159265f;
+            float           dy  = y1 - y0;
+            while (dy > kPi) dy -= 2.0f * kPi;
+            while (dy < -kPi) dy += 2.0f * kPi;
+            a_fcs->rotation.y += dy;
+            a_fcs->rotation.x = std::clamp(a_fcs->rotation.x + (p1 - p0), -1.55f, 1.55f);
+            a_fcs->translation = np;
+        } else {
+            s_off = {};
         }
     }
 
