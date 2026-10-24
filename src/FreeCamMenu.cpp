@@ -260,6 +260,7 @@ namespace FreeCamMenu {
         WriteINIInt("Collision", "bEnabled", c.enabled ? 1 : 0);
         WriteINIFloat("Collision", "fMargin", c.margin);
         WriteINIFloat("Collision", "fReturnSeconds", c.returnSec);
+        WriteINIFloat("Collision", "fApproachSeconds", c.approachSec);
         WriteINIInt("Collision", "iLayer", c.layer);
     }
 
@@ -876,6 +877,8 @@ namespace FreeCamMenu {
             wChanged |= ImGuiMCP::SliderFloat("Distance kept from a wall##cwMargin", &c.margin, 4.0f, 60.0f, "%.0f");
             ImGuiMCP::SetNextItemWidth(200.0f);
             wChanged |= ImGuiMCP::SliderFloat("Ease back out (s)##cwRet", &c.returnSec, 0.1f, 3.0f, "%.1f");
+            ImGuiMCP::SetNextItemWidth(200.0f);
+            wChanged |= ImGuiMCP::SliderFloat("Ease in to a wall (s)##cwApp", &c.approachSec, 0.0f, 2.0f, "%.2f");
             ImGuiMCP::TextColored(grey, "Walls: %s", CamCollision::MenuStatus().c_str());
             if (wChanged) {
                 CamCollision::Clamp();
@@ -1175,10 +1178,11 @@ namespace FreeCamMenu {
             c.enabled   = readInt("Collision", "bEnabled", d.enabled ? 1 : 0) != 0;
             c.margin    = readFloat("Collision", "fMargin", d.margin);
             c.returnSec = readFloat("Collision", "fReturnSeconds", d.returnSec);
+            c.approachSec = readFloat("Collision", "fApproachSeconds", d.approachSec);
             c.layer     = readInt("Collision", "iLayer", d.layer);
             CamCollision::Clamp();
-            SKSE::log::info("CamCollision: walls {} for the automatic cameras - margin {:.0f}, ease out {:.1f} s, ray layer {}",
-                c.enabled ? "on" : "off", c.margin, c.returnSec, c.layer);
+            SKSE::log::info("CamCollision: walls {} for the automatic cameras - margin {:.0f}, ease in {:.2f} s, ease out {:.1f} s, ray layer {}",
+                c.enabled ? "on" : "off", c.margin, c.approachSec, c.returnSec, c.layer);
         }
 
         // 0.13.1: a hand-edited TFCam.ini could hold values the menu sliders never allow (or text that is not a number).

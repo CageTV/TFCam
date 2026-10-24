@@ -17,6 +17,8 @@ namespace CamCollision {
         constexpr float kProbeFrac = 0.6f;   // side probes at margin * this round the camera
         constexpr float kHoldSec   = 0.25f;  // stay pulled in this long after the last push before easing out
         constexpr int   kMaxPasses = 8;      // characters / near hits skipped per ray
+        constexpr float kMaxSide   = 40.0f;  // 0.15.1: widest side probe, whatever the FOV
+        constexpr float kMinCushion = 6.0f;  // 0.15.1: while easing in, the camera is never nearer a wall than margin - cushion
 
         Settings s_cfg;
 
@@ -59,6 +61,35 @@ namespace CamCollision {
         float ExpWeight(float dt, float halfLife) { return dt <= 0.0f ? 0.0f : 1.0f - std::exp(-kLn2 * dt / halfLife); }
 
         float Len(const RE::NiPoint3& v) { return std::sqrt(v.x * v.x + v.y * v.y + v.z * v.z); }
+
+        // 0.15.1: how far the near plane's corners reach sideways, from the live world camera (the game's frustum, which also
+        // follows the eye view's near clip) and the current FOV. The FOV is taken as the vertical one: if it is the horizontal one
+        // this is wider than needed, never narrower. Logged once so the numbers can be checked in game.
+        float NearPlaneReach(float& a_near) {
+            a_near       = 15.0f;
+            float aspect = 16.0f / 9.0f;
+            float fov    = 70.0f;
+            if (auto* cam = RE::PlayerCamera::GetSingleton()) {
+                const float f = cam->GetRuntimeData2().worldFOV;
+                if (std::isfinite(f) && f > 5.0f && f < 170.0f) fov = f;
+            }
+            if (!REL::Module::IsVR()) {
+                if (auto* nc = RE::Main::WorldRootCamera()) {
+                    const auto& fr = nc->GetRuntimeData2().viewFrustum;
+                    if (std::isfinite(fr.fNear) && fr.fNear > 0.5f && fr.fNear < 100.0f) a_near = fr.fNear;
+                    const float w = fr.fRight - fr.fLeft;
+                    const float h = fr.fTop - fr.fBottom;
+                    if (std::isfinite(w) && std::isfinite(h) && w > 0.0f && h > 0.0f) aspect = std::clamp(w / h, 1.0f, 3.0f);
+                    static bool s_logged = false;
+                    if (!s_logged) {
+                        s_logged = true;
+                        SKSE::log::info("CamCollision: frustum l {:.3f} r {:.3f} b {:.3f} t {:.3f} near {:.2f} far {:.0f}, worldFOV {:.1f}",
+                            fr.fLeft, fr.fRight, fr.fBottom, fr.fTop, fr.fNear, fr.fFar, fov);
+                    }
+                }
+            }
+            return a_near * std::tan(fov * 0.5f * 0.01745329f) * aspect;
+        }
 
         bool IsCharacterLayer(RE::COL_LAYER a_layer) {
             switch (a_layer) {
@@ -125,6 +156,7 @@ namespace CamCollision {
         auto range = [](float& v, float lo, float hi, float def) { v = std::isfinite(v) ? std::clamp(v, lo, hi) : def; };
         range(s_cfg.margin, 4.0f, 60.0f, 16.0f);
         range(s_cfg.returnSec, 0.1f, 3.0f, 0.8f);
+        range(s_cfg.approachSec, 0.0f, 2.0f, 0.3f);
         if (s_cfg.layer < 1 || s_cfg.layer > 46) s_cfg.layer = 36;
     }
 
@@ -157,26 +189,33 @@ namespace CamCollision {
         }
         const RE::NiPoint3 dir = v * (1.0f / d);
 
-        // The camera point plus one either side of it, level with it (a thin wedge from the look point), so the near
-        // plane stays out of a wall the camera passes beside. No probes above / below: the spiral's floor-level shots
-        // would hit the floor with them.
+        // 0.15.1: the camera line plus one tube either side of it, level with it and as far out as the near plane's corners
+        // reach, so the near plane stays out of a wall the camera passes beside. The side rays run parallel to the camera line
+        // (not as a wedge from the look point): a wall beside the subject, or one the camera only passes along, does not count -
+        // only a wall that stands between the look point and the camera does. No probes above / below: the spiral's floor-level
+        // shots would hit the floor with them.
         RE::NiPoint3 side{ dir.y, -dir.x, 0.0f };
-        if (const float s = Len(side); s > 0.01f) {
-            side = side * (1.0f / s);
+        if (const float sl = Len(side); sl > 0.01f) {
+            side = side * (1.0f / sl);
         } else {
             side = { 1.0f, 0.0f, 0.0f };  // straight above / below the look point
         }
-        const float        r        = s_cfg.margin * kProbeFrac;
-        const RE::NiPoint3 probes[] = { cam, cam + side * r, cam - side * r };
+        float       nearClip = 15.0f;
+        const float reach    = NearPlaneReach(nearClip);
+        const float r        = std::clamp(reach, s_cfg.margin * kProbeFrac, kMaxSide);
+        // The camera body is kept at least the near clip (plus a hand) off the wall as well.
+        const float margin = (std::max)(s_cfg.margin, nearClip + 4.0f);
+        struct Probe {
+            RE::NiPoint3 from, to;
+        };
+        const Probe probes[] = { { s_pivot, cam }, { s_pivot + side * r, cam + side * r }, { s_pivot - side * r, cam - side * r } };
 
         Hit   nearest;
         float allowed = d;
         for (const auto& probe : probes) {
-            const Hit h = Cast(world, s_pivot, probe);
+            const Hit h = Cast(world, probe.from, probe.to);
             if (!h.hit) continue;
-            const float probeLen = Len(probe - s_pivot);
-            const float along    = probeLen > 0.0f ? h.dist * (d / probeLen) : h.dist;  // that hit on the camera's line
-            const float a        = (std::max)(along - s_cfg.margin, (std::min)(kMinDist, d));
+            const float a = (std::max)(h.dist - margin, (std::min)(kMinDist, d));  // the side rays are as long as the centre one
             if (a < allowed) {
                 allowed = a;
                 nearest = h;
@@ -187,12 +226,20 @@ namespace CamCollision {
         if (need >= s_comp) {
             if (need > 0.5f && s_comp <= 0.5f && now >= s_nextLog) {
                 s_nextLog = now + 0.5;
-                const auto text = std::format("{}: pulled in {:.0f} of {:.0f} units by {:08X} (layer {})", s_who, need, d,
-                    nearest.ref, nearest.layer);
+                const auto text = std::format("{}: pulled in {:.0f} of {:.0f} units by {:08X} (layer {}, side probes {:.0f}, kept {:.0f})",
+                    s_who, need, d, nearest.ref, nearest.layer, r, margin);
                 SKSE::log::info("CamCollision: {}", text);
                 NotePush(text);
             }
-            s_comp      = need;
+            if (need > s_comp) {
+                // 0.15.1: ease in instead of snapping. How far the camera may trail the wall is capped (the cushion), so it
+                // never gets nearer the wall than half the kept distance, however fast it moves into it.
+                const float cushion = (std::max)(margin * 0.5f, kMinCushion);
+                s_comp = s_cfg.approachSec <= 0.01f
+                    ? need
+                    : (std::max)(s_comp + (need - s_comp) * ExpWeight(dt, s_cfg.approachSec / 4.32f), need - cushion);
+                s_comp = (std::min)(s_comp, need);
+            }
             s_holdUntil = now + kHoldSec;
         } else if (now >= s_holdUntil) {
             s_comp = need + (s_comp - need) * (1.0f - ExpWeight(dt, s_cfg.returnSec / 4.32f));
