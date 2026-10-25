@@ -71,6 +71,7 @@ namespace FreeCam {
     // 0.7.9 diagnostics. SKSEPluginLoad runs on the game's main thread (kDataLoaded does NOT: it runs on the
     // data-loading thread), so that is where the main thread id is recorded.
     void        NoteMainThread();
+    bool        OnMainThreadNow();  // 0.16.0: the calling thread is the game's main thread
     std::string ThreadTag();  // "thread N (main)" / "thread N (NOT the main thread ...)"
 
     // 0.7.9 scripted-tfc guard (SlccBridge's console tfc wrapper). Poser Hotkeys Plus closes ANY free camera on

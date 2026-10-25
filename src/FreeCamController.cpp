@@ -253,10 +253,14 @@ namespace FreeCam {
     static std::atomic<bool> s_beginOffMainLogged{ false };
     static std::atomic<bool> s_endOffMainLogged{ false };
 
+    bool OnMainThreadNow();
+
     static bool OnMainThread() {
         const auto main = s_mainThreadId.load();
         return main != 0 && static_cast<std::uint32_t>(::GetCurrentThreadId()) == main;
     }
+
+    bool OnMainThreadNow() { return OnMainThread(); }
 
     static bool HookWorkRunsInline() {
         return OnMainThread() && s_hookBatchesPending.load() == 0;

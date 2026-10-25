@@ -195,6 +195,8 @@ namespace ConvoCam {
             St               st        = St::kOff;
             double           startedAt = 0.0;
             bool             havePre   = false;
+            bool             seenMenu  = false;     // the Dialogue Menu itself has been open (the end is then the menu closing)
+            double           lastTalk  = 0.0;       // the last time the menu was open or the NPC was saying a line
             bool             dialogueSeen = false;  // the Dialogue Menu has been open since this session armed
             double           armedAt   = 0.0;
             bool             firstPerson = false;  // the game's camera was first person when the conversation began
@@ -257,6 +259,15 @@ namespace ConvoCam {
         bool NpcTalking() {
             auto* mtm = RE::MenuTopicManager::GetSingleton();
             return mtm && mtm->currentTopicInfo != nullptr;
+        }
+
+        // The NPC of this session is saying a line to the player - with or without the Dialogue Menu (scenes speak without it).
+        bool OurSpeakerTalking() {
+            auto* mtm = RE::MenuTopicManager::GetSingleton();
+            if (!mtm || mtm->currentTopicInfo == nullptr) return false;
+            auto spk = mtm->speaker.get();
+            auto ours = s_s.speaker.get();
+            return spk && ours && spk.get() == ours.get();
         }
 
         RE::Actor* SpeakerActor() {
@@ -505,16 +516,21 @@ namespace ConvoCam {
                 auto* actor = evt->objectActivated->As<RE::Actor>();
                 if (!actor) return RE::BSEventNotifyControl::kContinue;
                 const auto handle = actor->CreateRefHandle();
-                if (auto* tasks = SKSE::GetTaskInterface()) {
-                    tasks->AddTask([handle] {
-                        auto  ref = handle.get();
-                        auto* a   = ref ? ref->As<RE::Actor>() : nullptr;
-                        if (const char* block = ArmBlock(a)) {
-                            SKSE::log::info("ConvoCam: activation of {} ignored - {}", a ? (a->GetDisplayFullName() ? a->GetDisplayFullName() : "an actor") : "?", block);
-                            return;
-                        }
-                        Arm(a);
-                    });
+                const auto arm    = [handle] {
+                    auto  ref = handle.get();
+                    auto* a   = ref ? ref->As<RE::Actor>() : nullptr;
+                    if (const char* block = ArmBlock(a)) {
+                        SKSE::log::info("ConvoCam: activation of {} ignored - {}", a ? (a->GetDisplayFullName() ? a->GetDisplayFullName() : "an actor") : "?", block);
+                        return;
+                    }
+                    Arm(a);
+                };
+                // Right here when this is the game's own thread: the dialogue opens within a frame of the activation, and a task
+                // queued for the next frame came after it for most NPCs (2026-10-24).
+                if (FreeCam::OnMainThreadNow()) {
+                    arm();
+                } else if (auto* tasks = SKSE::GetTaskInterface()) {
+                    tasks->AddTask(arm);
                 }
                 return RE::BSEventNotifyControl::kContinue;
             }
@@ -551,10 +567,16 @@ namespace ConvoCam {
                 PublishStatus(s_cfg.enabled ? nullptr : "off");
                 return;
             }
-            const bool talking = DialogueOpen();
-            if (talking && !s_s.dialogueSeen) {
-                s_s.dialogueSeen = true;
+            const bool menu     = DialogueOpen();
+            const bool lineTalk = OurSpeakerTalking();
+            if (menu || lineTalk) s_s.lastTalk = now;
+            if (menu && !s_s.seenMenu) {
+                s_s.seenMenu = true;
                 Event("the dialogue opened");
+            }
+            if ((menu || lineTalk) && !s_s.dialogueSeen) {
+                s_s.dialogueSeen = true;
+                if (!menu) Event("the NPC is talking without the dialogue menu (a scene)");
             }
             const bool free = Cam() && Cam()->IsInFreeCameraMode();
             if (s_s.st == St::kStarting && !free && now - s_s.startedAt > 2.0) {
@@ -570,11 +592,16 @@ namespace ConvoCam {
             if (s_s.st == St::kStarting || s_s.st == St::kRunning) {
                 if (!s_cfg.enabled) {
                     BeginReturn(s_cfg.blendOut, "turned off");
-                } else if (s_s.dialogueSeen && !talking) {
+                } else if (s_s.seenMenu && !menu) {
                     BeginReturn(s_cfg.blendOut, "the conversation ended");
+                } else if (s_s.dialogueSeen && !s_s.seenMenu && !lineTalk && now - s_s.lastTalk > 1.5) {
+                    BeginReturn(s_cfg.blendOut, "the NPC has finished talking");
                 } else if (!s_s.dialogueSeen && now - s_s.armedAt > 2.5) {
+                    auto* mtm = RE::MenuTopicManager::GetSingleton();
+                    SKSE::log::info("ConvoCam: nothing opened for {} - dialogue manager: menuOpen {}, speaker {}, current topic info {}", s_s.speakerName,
+                        mtm ? mtm->menuOpen : false, mtm && mtm->speaker.get() ? "set" : "none", mtm && mtm->currentTopicInfo ? "set" : "none");
                     BeginReturn(0.8f, "no dialogue opened");
-                } else if (!SpeakerActor() && s_s.dialogueSeen) {
+                } else if (s_s.dialogueSeen && !s_s.speaker.get()) {
                     BeginReturn(0.6f, "the speaker is gone");
                 } else if (SceneTracker::PlayerSceneActive()) {
                     BeginReturn(0.6f, "a scene started");
@@ -648,7 +675,7 @@ namespace ConvoCam {
             // Which shot: over the player's shoulder while the NPC talks, the reverse while it is the player's turn - never
             // sooner than minShotSec after the last change.
             const double now     = Now();
-            const Shot   wanted  = (s_cfg.alternate && s_s.dialogueSeen && DialogueOpen() && !NpcTalking() && s_s.clock > 0.5f) ? Shot::kReverse : Shot::kOverPlayer;
+            const Shot   wanted  = (s_cfg.alternate && s_s.seenMenu && DialogueOpen() && !NpcTalking() && s_s.clock > 0.5f) ? Shot::kReverse : Shot::kOverPlayer;
             if (wanted != s_s.shot && now - s_s.shotSince >= s_cfg.minShotSec) {
                 s_s.shot      = wanted;
                 s_s.shotSince = now;
