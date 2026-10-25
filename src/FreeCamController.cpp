@@ -1103,12 +1103,14 @@ namespace FreeCam {
     struct ActivateBlockHook {
         static void thunk(RE::ActivateHandler* a_this, RE::ButtonEvent* a_event,
                           RE::PlayerControlsData* a_data) {
-            // 0.16.0: the conversation camera begins right after the game has handled this press (the dialogue menu opens a frame
-            // later); the press itself must reach the game first.
+            // 0.16.0: the conversation camera begins right after the game has handled the RELEASE of this tap (it acts on the
+            // release); the release itself must reach the game first.
             if (a_event) {
-                if (const auto convoTarget = ConvoCam::ActivatePressTarget(a_event)) {
+                if (a_event->IsDown()) {
+                    ConvoCam::NotePress(a_event);
+                } else if (ConvoCam::PendingRelease(a_event)) {
                     func(a_this, a_event, a_data);
-                    ConvoCam::BeginForActivation(convoTarget);
+                    ConvoCam::BeginPending();
                     return;
                 }
             }

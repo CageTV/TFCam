@@ -819,46 +819,59 @@ namespace ConvoCam {
 
     bool OwnsMotion() { return s_s.st == St::kRunning || s_s.st == St::kReturning || s_s.st == St::kStarting; }
 
-    RE::ObjectRefHandle ActivatePressTarget(RE::ButtonEvent* a_event) {
-        if (a_event && a_event->IsDown()) {  // passive: what did this press land on, and does the dialogue open
-            if (auto* pk = RE::CrosshairPickData::GetSingleton()) {
-                auto  r  = pk->GetActiveTarget().get();
-                auto* pa = r ? r->As<RE::Actor>() : nullptr;
-                if (pa) {
-                    const char* nm = pa->GetDisplayFullName();
-                    s_watch.who    = nm ? nm : "an actor";
-                    s_watch.who += pa->GetCurrentScene() ? " (in a scene)" : "";
-                    s_watch.at     = Now();
-                    s_watch.stage  = 1;
-                    SKSE::log::info("ConvoCam: press on {} - conversation camera {}", s_watch.who, s_cfg.enabled ? "on" : "off");
-                }
-            }
-        }
-        if (!a_event || !s_cfg.enabled || s_s.st != St::kOff || !a_event->IsDown()) return {};
-        auto* pick = RE::CrosshairPickData::GetSingleton();
-        if (!pick) return {};
-        const auto handle = pick->GetActiveTarget();
-        auto       ref    = handle.get();
-        auto*      a      = ref ? ref->As<RE::Actor>() : nullptr;
-        if (!a) return {};
-        if (const char* block = ArmBlock(a)) {
-            SKSE::log::info("ConvoCam: activate pressed on {} - not armed: {}", a->GetDisplayFullName() ? a->GetDisplayFullName() : "an actor", block);
-            return {};
-        }
-        return handle;
+    namespace {
+        RE::ObjectRefHandle s_pending;
+        double              s_pendingAt = 0.0;
     }
 
-    void BeginForActivation(RE::ObjectRefHandle a_target) {
-        auto  ref = a_target.get();
-        auto* a   = ref ? ref->As<RE::Actor>() : nullptr;
+    void NotePress(RE::ButtonEvent* a_event) {
+        s_pending = {};
+        if (!a_event || !a_event->IsDown()) return;
+        auto* pk = RE::CrosshairPickData::GetSingleton();
+        if (!pk) return;
+        const auto handle = pk->GetActiveTarget();
+        auto       r      = handle.get();
+        auto*      a      = r ? r->As<RE::Actor>() : nullptr;
         if (!a) return;
-        if (const char* block = ArmBlock(a)) {  // the press itself may have changed things (a dialogue already open, a menu)
-            SKSE::log::info("ConvoCam: not armed after the press: {}", block);
+        // passive diagnostics, whatever the setting: does the dialogue open after this press
+        const char* nm = a->GetDisplayFullName();
+        s_watch.who    = nm ? nm : "an actor";
+        s_watch.who += a->GetCurrentScene() ? " (in a scene)" : "";
+        s_watch.at    = Now();
+        s_watch.stage = 1;
+        SKSE::log::info("ConvoCam: press on {} - conversation camera {}", s_watch.who, s_cfg.enabled ? "on" : "off");
+        if (!s_cfg.enabled) return;
+        if (const char* block = ArmBlock(a)) {
+            SKSE::log::info("ConvoCam: activate pressed on {} - not armed: {}", s_watch.who, block);
             return;
         }
+        s_pending   = handle;
+        s_pendingAt = Now();
+    }
+
+    bool PendingRelease(RE::ButtonEvent* a_event) {
+        if (!s_pending || !a_event || !a_event->IsUp()) return false;
+        if (Now() - s_pendingAt > 2.0) {
+            s_pending = {};
+            return false;
+        }
+        return true;
+    }
+
+    void BeginPending() {
+        const auto handle = s_pending;
+        s_pending         = {};
+        auto  ref         = handle.get();
+        auto* a           = ref ? ref->As<RE::Actor>() : nullptr;
+        if (!a) return;
         auto* mtm = RE::MenuTopicManager::GetSingleton();
-        SKSE::log::info("ConvoCam: after the press - dialogue manager: menuOpen {}, speaker {}, greeting {}, topic info {}", mtm ? mtm->menuOpen : false,
-            mtm && mtm->speaker.get() ? "set" : "none", mtm ? mtm->isGreetingPlayer : false, mtm && mtm->currentTopicInfo ? "set" : "none");
+        SKSE::log::info("ConvoCam: after the release ({:.0f} ms after the press) - dialogue manager: menuOpen {}, speaker {}, greeting {}, topic info {}",
+            (Now() - s_pendingAt) * 1000.0, mtm ? mtm->menuOpen : false, mtm && mtm->speaker.get() ? "set" : "none",
+            mtm ? mtm->isGreetingPlayer : false, mtm && mtm->currentTopicInfo ? "set" : "none");
+        if (const char* block = ArmBlock(a)) {  // the release itself may have changed things (a dialogue already open, a menu)
+            SKSE::log::info("ConvoCam: not armed after the release: {}", block);
+            return;
+        }
         Arm(a);
     }
 

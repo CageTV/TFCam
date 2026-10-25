@@ -44,13 +44,15 @@ namespace ConvoCam {
     bool OwnsMotion();                                       // the conversation camera moves the camera (menu restore etc. stand down)
     void OnGameLoad(const char* a_why);
 
-    // The Activate button went down (ActivateHandler::ProcessButton, main thread). Two steps around the game's own handling of the
-    // press: ActivatePressTarget() before it says which NPC the crosshair is on (empty = not a conversation to film), and
-    // BeginForActivation() right after it - the game has started the conversation by then and the dialogue menu opens a frame
-    // later, so the free camera begins before the menu and still ends after it. (Beginning the free camera BEFORE the game acts on
-    // the press made it activate from the free camera's viewpoint: no dialogue for some NPCs.)
-    RE::ObjectRefHandle ActivatePressTarget(RE::ButtonEvent* a_event);
-    void                BeginForActivation(RE::ObjectRefHandle a_target);
+    // The Activate button (ActivateHandler::ProcessButton, main thread). The game acts on a TAP when the button is RELEASED
+    // (HeldStateHandler), so the free camera must not begin on the press: it would be on by the time the release arrives and
+    // TFCam would swallow it - the dialogue never opened and the handler's held-button state stayed stuck (2026-10-25 log).
+    //   NotePress()     - button went down: remember the NPC under the crosshair if it is one to film (nothing else happens).
+    //   PendingRelease() - true when the release that follows should be let through and then start the camera.
+    //   BeginPending()  - call right after the game has handled that release.
+    void NotePress(RE::ButtonEvent* a_event);
+    bool PendingRelease(RE::ButtonEvent* a_event);
+    void BeginPending();
 
     struct MenuStatus {
         char state[96]      = {};
