@@ -55,6 +55,29 @@ camera's frustum.
 Settings: `TFCam.ini` sections `[Idle]`, `[Furniture]` and `[Collision]` (written by the page; an older file uses the
 defaults).
 
+## Conversation camera (0.16.0)
+
+Page: **SKSE Menu Framework > FreeCam > Idle & Furniture > Conversation**. Off by default (tick *Conversation camera on*).
+When you talk to an NPC in third person, TFCam's free camera takes over and films the conversation like a film scene:
+
+- *Over your shoulder* while the NPC speaks (the NPC sits off to one side of the frame), and a *reverse shot* while it is your turn:
+  over the NPC's shoulder, or a wide two-shot from the side (*Wide two-shot*). A shot stays at least *A shot stays at least* seconds.
+- Every move is smooth: the camera is held in cylindrical coordinates (angle, radius, height) round the midpoint of the two speakers and each
+  is damped, so a change of shot swings round the pair instead of cutting through them. *Handheld sway* adds a slow drift.
+- The camera starts on the **release** of the Activate tap, once the game has started the dialogue (the game acts on the release; starting the
+  free camera before it kept the dialogue from opening), and ends after the Dialogue Menu closes, easing back behind the player. It is
+  not started for a bark with no dialogue menu, for dead / hostile / in-combat NPCs, while sneaking, in a SexLab scene, with a menu open or
+  while another free camera is on. First person keeps the game's view (*Third person only*).
+- Walls: the framed look point goes through the same wall handling as the other automatic cameras.
+- The game's mouse edge-pan in dialogue (`fPCDialogueLookSpeed`) is held at 0 while the camera films, and put back after. *No mouse edge-pan
+  in any dialogue* (`bNoEdgePan`) holds it at 0 for every dialogue.
+
+Not done yet: a dialogue the NPC starts by itself (a quest scene that walks up to you and talks) is not filmed, because the camera has no
+Activate press to start from; the game's own view is used there.
+
+Settings: `TFCam.ini` section `[Conversation]`: `bEnabled`, `bThirdPersonOnly`, `fBlendIn`, `fBlendOut`, `fShotSwitch`, `fMinShotSeconds`,
+`fDistance`, `fShoulder`, `fHeight`, `fLookShift`, `fFovNpc`, `fFovWide`, `bAlternate`, `iReverseKind`, `bSwapSide`, `fDrift`, `bNoEdgePan`.
+
 ## Scene Camera (0.10.0, extended in 0.13.0)
 
 TFCam's free camera can work as a scene camera for SexLab P+ scenes (with SexLab P+'s automatic free camera on, a scene
@@ -113,6 +136,14 @@ What it does is logged to `TFCam.log` in SKSE's log folder (`Documents/My Games/
 the scene / stage ids, shots saved / recalled / deleted, refusals, automatic free camera waits and drops).
 
 ## Changelog
+
+**0.16.0** (fork by CageTV)
+- *Conversation camera* (`[Conversation]`, off by default): a film-style camera for dialogue in third person. Over-the-shoulder shot while the
+  NPC speaks, reverse shot (over the NPC's shoulder or a wide two-shot) on your turn, smooth swings round the pair, optional sway, back behind
+  the player when the conversation ends. It starts on the release of the Activate tap once the game has opened the dialogue, and works for
+  NPCs that are in a scene. Not filmed yet: dialogue an NPC starts by itself.
+- The game's mouse edge-pan in dialogue is held off while the camera films; `bNoEdgePan` turns it off for every dialogue.
+- A conversation camera page on *Idle & Furniture* with a sliders / tick box for every setting.
 
 **0.15.1** (fork by CageTV)
 - *Walls* rework: the camera slides along a wall instead of being pulled toward the player, so passing a wall no longer
