@@ -489,6 +489,9 @@ namespace ConvoCam {
             if (!player || !a_actor || a_actor->IsPlayerRef()) return "not an NPC";
             if (a_actor->IsDead() || a_actor->IsInCombat() || player->IsInCombat() || a_actor->IsHostileToActor(player)) return "dead / hostile / in combat";
             if (player->IsSneaking()) return "sneaking (pickpocket)";
+            // An NPC in a scene (talking to another NPC, a quest scene) needs the game a moment to stop the scene before the
+            // dialogue opens; a free camera begun in that moment kept it from opening at all (Sven and his mother, 2026-10-24).
+            if (a_actor->GetCurrentScene()) return "the NPC is in a scene";
             if (DialogueOpen()) return "a dialogue is open already";
             if (!PlainGameplay()) return "a menu is open";
             if (FreeCam::IsActive()) return "free camera is on";
@@ -818,6 +821,9 @@ namespace ConvoCam {
             SKSE::log::info("ConvoCam: not armed after the press: {}", block);
             return;
         }
+        auto* mtm = RE::MenuTopicManager::GetSingleton();
+        SKSE::log::info("ConvoCam: after the press - dialogue manager: menuOpen {}, speaker {}, greeting {}, topic info {}", mtm ? mtm->menuOpen : false,
+            mtm && mtm->speaker.get() ? "set" : "none", mtm ? mtm->isGreetingPlayer : false, mtm && mtm->currentTopicInfo ? "set" : "none");
         Arm(a);
     }
 
