@@ -103,6 +103,23 @@ namespace CamCollision {
             return std::isfinite(radius) && radius > 0.1f && radius < s_cfg.ignoreSmall;
         }
 
+        // 0.15.4: the two tickable pass-throughs, decided from the hit object's size and the surface it was hit on. A large item is
+        // anything from ignoreSmall up to largeItem; above that it is architecture, and only its upright surfaces are "walls"
+        // (floors and ceilings keep the camera in the room).
+        bool IsPassThrough(RE::COL_LAYER a_layer, RE::TESObjectREFR* a_ref, const RE::NiPoint3& a_normal) {
+            if (!s_cfg.passLarge && !s_cfg.passWalls) return false;
+            float radius = 0.0f;
+            if (a_ref) {
+                if (auto* root = a_ref->Get3D()) radius = root->worldBound.radius;
+            }
+            if (!std::isfinite(radius) || radius <= 0.1f) return false;  // no size: it counts
+            if (radius < s_cfg.largeItem) return s_cfg.passLarge;
+            if (!s_cfg.passWalls) return false;
+            if (a_layer != RE::COL_LAYER::kStatic && a_layer != RE::COL_LAYER::kAnimStatic) return false;
+            const float nl = Len(a_normal);
+            return nl > 0.5f && std::fabs(a_normal.z / nl) < 0.7f;  // an upright surface
+        }
+
         bool IsCharacterLayer(RE::COL_LAYER a_layer) {
             switch (a_layer) {
             case RE::COL_LAYER::kBiped:
@@ -143,7 +160,10 @@ namespace CamCollision {
                 const auto* coll  = pick.rayOutput.rootCollidable;
                 const auto  layer = coll ? coll->GetCollisionLayer() : RE::COL_LAYER::kUnidentified;
                 auto*       ref   = coll ? RE::TESHavokUtilities::FindCollidableRef(*coll) : nullptr;
-                if (IsCharacterLayer(layer) || (ref && ref->IsActor()) || IsSmallProp(layer, ref) || frac * len < kSkipNear) {
+                const RE::NiPoint3 hitNormal{ pick.rayOutput.normal.quad.m128_f32[0], pick.rayOutput.normal.quad.m128_f32[1],
+                    pick.rayOutput.normal.quad.m128_f32[2] };
+                if (IsCharacterLayer(layer) || (ref && ref->IsActor()) || IsSmallProp(layer, ref) || IsPassThrough(layer, ref, hitNormal) ||
+                    frac * len < kSkipNear) {
                     start = frac + 1.0f / len;  // step 1 unit past it and look again
                     continue;
                 }
@@ -239,6 +259,7 @@ namespace CamCollision {
         range(s_cfg.returnSec, 0.1f, 3.0f, 0.8f);
         range(s_cfg.approachSec, 0.0f, 2.0f, 0.3f);
         range(s_cfg.ignoreSmall, 0.0f, 200.0f, 50.0f);
+        range(s_cfg.largeItem, 60.0f, 600.0f, 200.0f);
         if (s_cfg.layer < 1 || s_cfg.layer > 46) s_cfg.layer = 36;
     }
 

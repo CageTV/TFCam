@@ -262,6 +262,9 @@ namespace FreeCamMenu {
         WriteINIFloat("Collision", "fReturnSeconds", c.returnSec);
         WriteINIFloat("Collision", "fApproachSeconds", c.approachSec);
         WriteINIFloat("Collision", "fIgnoreSmallerThan", c.ignoreSmall);
+        WriteINIInt("Collision", "bPassLargeItems", c.passLarge ? 1 : 0);
+        WriteINIInt("Collision", "bPassWalls", c.passWalls ? 1 : 0);
+        WriteINIFloat("Collision", "fLargeItemRadius", c.largeItem);
         WriteINIInt("Collision", "iLayer", c.layer);
     }
 
@@ -884,6 +887,8 @@ namespace FreeCamMenu {
             ImGuiMCP::SetNextItemWidth(200.0f);
             wChanged |= ImGuiMCP::SliderFloat("Ignore objects smaller than##cwSmall", &c.ignoreSmall, 0.0f, 200.0f, "%.0f");
             ImGuiMCP::TextColored(grey, "Sconces, books and things on a table are not walls. 0 = everything counts.");
+            wChanged |= ImGuiMCP::Checkbox("Pass through large items (furniture, big props)##cwLarge", &c.passLarge);
+            wChanged |= ImGuiMCP::Checkbox("Pass through walls (floors and ceilings still stop it)##cwWalls", &c.passWalls);
             ImGuiMCP::TextColored(grey, "Walls: %s", CamCollision::MenuStatus().c_str());
             if (wChanged) {
                 CamCollision::Clamp();
@@ -1188,6 +1193,9 @@ namespace FreeCamMenu {
             c.returnSec = readFloat("Collision", "fReturnSeconds", d.returnSec);
             c.approachSec = readFloat("Collision", "fApproachSeconds", d.approachSec);
             c.ignoreSmall = readFloat("Collision", "fIgnoreSmallerThan", d.ignoreSmall);
+            c.passLarge   = readInt("Collision", "bPassLargeItems", d.passLarge ? 1 : 0) != 0;
+            c.passWalls   = readInt("Collision", "bPassWalls", d.passWalls ? 1 : 0) != 0;
+            c.largeItem   = readFloat("Collision", "fLargeItemRadius", d.largeItem);
             c.layer     = readInt("Collision", "iLayer", d.layer);
             CamCollision::Clamp();
             SKSE::log::info("CamCollision: walls {} for the automatic cameras - margin {:.0f}, ease in {:.2f} s, ease out {:.1f} s, ray layer {}",

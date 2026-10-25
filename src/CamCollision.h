@@ -17,6 +17,9 @@ namespace CamCollision {
         float margin    = 16.0f;  // units kept between the camera and a wall; 4..60
         float returnSec = 0.8f;   // seconds to ease back out (about 95% of the way) once clear; 0.1..3
         float approachSec = 0.3f; // 0.15.1: seconds to ease in towards a wall (about 95% of the way); 0 = at once; 0..2
+        bool  passLarge   = false; // 0.15.4: furniture and other big props (bounding sphere from ignoreSmall up to largeItem) are not walls
+        bool  passWalls   = false; // 0.15.4: the walls of buildings and rooms are not walls (floors, ceilings and terrain still are)
+        float largeItem   = 200.0f; // 0.15.4: bounding sphere radius that separates a large item from architecture; ini only; 60..600
         float ignoreSmall = 50.0f; // 0.15.3: objects whose bounding sphere is smaller than this (sconces, things on a table) are not walls; 0 = all count; 0..200
         int   layer     = 36;     // collision layer of the probe rays (36 = camera sphere, 41 = line of sight); ini only
     };
