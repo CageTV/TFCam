@@ -6,6 +6,7 @@
 #include "CellEntryCam.h"
 #include "SceneCam.h"
 #include "AmbientCam.h"
+#include "ConvoCam.h"
 
 #include <spdlog/sinks/basic_file_sink.h>
 #include <ShlObj.h>
@@ -124,6 +125,7 @@ namespace {
             SceneTracker::Register();  // 0.7.8: player SexLab scenes for the SLCC camera cycle
             SceneCam::Install();       // 0.10.0: orbit / eye view / saved shots
             AmbientCam::Install();     // 0.11.0: idle camera + furniture camera
+            ConvoCam::Install();       // 0.16.0: conversation camera
             FreeCamMenu::Register();
             FreeCamMenu::ApplyGameSettings();
             break;
@@ -133,17 +135,20 @@ namespace {
             SceneTracker::Reset("save loading");
             SceneCam::OnGameLoad("save loading");
             AmbientCam::OnGameLoad("save loading");
+            ConvoCam::OnGameLoad("save loading");
             break;
         case SKSE::MessagingInterface::kPostLoadGame:
             SceneTracker::Reset("save loaded");
             SceneCam::OnGameLoad("save loaded");
             AmbientCam::OnGameLoad("save loaded");
+            ConvoCam::OnGameLoad("save loaded");
             SlccBridge::OnGameLoaded("save loaded");
             break;
         case SKSE::MessagingInterface::kNewGame:
             SceneTracker::Reset("new game");
             SceneCam::OnGameLoad("new game");
             AmbientCam::OnGameLoad("new game");
+            ConvoCam::OnGameLoad("new game");
             SlccBridge::OnGameLoaded("new game");
             break;
         default:

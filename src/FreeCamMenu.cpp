@@ -6,6 +6,7 @@
 #include "CellEntryCam.h"
 #include "SceneCam.h"
 #include "AmbientCam.h"
+#include "ConvoCam.h"
 #include "CamCollision.h"
 #include "SceneShots.h"
 
@@ -172,6 +173,7 @@ namespace FreeCamMenu {
     static void WriteSceneCamValues();
     static void WriteAmbientValues();
     static void WriteCollisionValues();
+    static void WriteConvoValues();
 
     // Called on every settings change (every frame while a slider is dragged), so the log is rate-limited.
     static void SaveINI() {
@@ -252,6 +254,28 @@ namespace FreeCamMenu {
         WriteSceneCamValues();
         WriteAmbientValues();
         WriteCollisionValues();
+        WriteConvoValues();
+    }
+
+    // 0.16.0 conversation camera, TFCam.ini [Conversation].
+    static void WriteConvoValues() {
+        const auto& c = ConvoCam::Get();
+        WriteINIInt("Conversation", "bEnabled", c.enabled ? 1 : 0);
+        WriteINIInt("Conversation", "bThirdPersonOnly", c.thirdPersonOnly ? 1 : 0);
+        WriteINIFloat("Conversation", "fBlendIn", c.blendIn);
+        WriteINIFloat("Conversation", "fBlendOut", c.blendOut);
+        WriteINIFloat("Conversation", "fShotSwitch", c.shotSwitch);
+        WriteINIFloat("Conversation", "fMinShotSeconds", c.minShotSec);
+        WriteINIFloat("Conversation", "fDistance", c.distance);
+        WriteINIFloat("Conversation", "fShoulder", c.shoulder);
+        WriteINIFloat("Conversation", "fHeight", c.height);
+        WriteINIFloat("Conversation", "fLookShift", c.lookShift);
+        WriteINIFloat("Conversation", "fFovNpc", c.fovNpc);
+        WriteINIFloat("Conversation", "fFovWide", c.fovWide);
+        WriteINIInt("Conversation", "bAlternate", c.alternate ? 1 : 0);
+        WriteINIInt("Conversation", "iReverseKind", c.reverseKind);
+        WriteINIInt("Conversation", "bSwapSide", c.swapSide ? 1 : 0);
+        WriteINIFloat("Conversation", "fDrift", c.drift);
     }
 
     // 0.12.0 walls for the automatic cameras, TFCam.ini [Collision].
@@ -957,6 +981,57 @@ namespace FreeCamMenu {
         }
         if (ms.lastEvent[0]) ImGuiMCP::TextColored(grey, "Last: %s", ms.lastEvent);
 
+        // 0.16.0
+        {
+            auto& cv = ConvoCam::Get();
+            bool  cvChanged = false;
+            const auto cs = ConvoCam::GetMenuStatus();
+            ImGuiMCP::SeparatorText("Conversation camera");
+            ImGuiMCP::TextColored(grey,
+                "While you talk to someone the camera frames the conversation like a film: over your shoulder while the NPC "
+                "speaks, the reverse shot while it is your turn. Every move is damped, so it glides and never cuts or races. "
+                "When the conversation ends it eases back to the game's camera.");
+            ImGuiMCP::Text("Now: %s", cs.state[0] ? cs.state : "-");
+            if (cs.shot[0]) ImGuiMCP::Text("Shot: %s", cs.shot);
+            if (cs.speaker[0]) ImGuiMCP::Text("Speaking with: %s", cs.speaker);
+            cvChanged |= ImGuiMCP::Checkbox("Conversation camera on##cvOn", &cv.enabled);
+            cvChanged |= ImGuiMCP::Checkbox("Third person only##cvTp", &cv.thirdPersonOnly);
+            cvChanged |= ImGuiMCP::Checkbox("Reverse shot while it is your turn##cvAlt", &cv.alternate);
+            bool twoShot = cv.reverseKind == 1;
+            if (ImGuiMCP::Checkbox("Wide two-shot instead of over the NPC's shoulder##cvKind", &twoShot)) {
+                cv.reverseKind = twoShot ? 1 : 0;
+                cvChanged      = true;
+            }
+            cvChanged |= ImGuiMCP::Checkbox("Other shoulder##cvSide", &cv.swapSide);
+            ImGuiMCP::SetNextItemWidth(200.0f);
+            cvChanged |= ImGuiMCP::SliderFloat("Settle on the first shot (s)##cvIn", &cv.blendIn, 0.3f, 6.0f, "%.1f");
+            ImGuiMCP::SetNextItemWidth(200.0f);
+            cvChanged |= ImGuiMCP::SliderFloat("Change of shot takes (s)##cvSw", &cv.shotSwitch, 0.3f, 6.0f, "%.1f");
+            ImGuiMCP::SetNextItemWidth(200.0f);
+            cvChanged |= ImGuiMCP::SliderFloat("A shot stays at least (s)##cvMin", &cv.minShotSec, 0.5f, 15.0f, "%.1f");
+            ImGuiMCP::SetNextItemWidth(200.0f);
+            cvChanged |= ImGuiMCP::SliderFloat("Back to the game's camera (s)##cvOut", &cv.blendOut, 0.0f, 6.0f, "%.1f");
+            ImGuiMCP::SetNextItemWidth(200.0f);
+            cvChanged |= ImGuiMCP::SliderFloat("Distance behind the near speaker##cvDist", &cv.distance, 40.0f, 400.0f, "%.0f");
+            ImGuiMCP::SetNextItemWidth(200.0f);
+            cvChanged |= ImGuiMCP::SliderFloat("Sideways (shoulder)##cvSh", &cv.shoulder, -100.0f, 100.0f, "%.0f");
+            ImGuiMCP::SetNextItemWidth(200.0f);
+            cvChanged |= ImGuiMCP::SliderFloat("Height above the eyes##cvH", &cv.height, -40.0f, 80.0f, "%.0f");
+            ImGuiMCP::SetNextItemWidth(200.0f);
+            cvChanged |= ImGuiMCP::SliderFloat("Framed speaker off centre##cvLs", &cv.lookShift, -80.0f, 80.0f, "%.0f");
+            ImGuiMCP::SetNextItemWidth(200.0f);
+            cvChanged |= ImGuiMCP::SliderFloat("FOV over the shoulder##cvF1", &cv.fovNpc, 20.0f, 100.0f, "%.0f");
+            ImGuiMCP::SetNextItemWidth(200.0f);
+            cvChanged |= ImGuiMCP::SliderFloat("FOV two-shot##cvF2", &cv.fovWide, 20.0f, 110.0f, "%.0f");
+            ImGuiMCP::SetNextItemWidth(200.0f);
+            cvChanged |= ImGuiMCP::SliderFloat("Handheld sway##cvDr", &cv.drift, 0.0f, 3.0f, "%.1f");
+            if (cs.lastEvent[0]) ImGuiMCP::TextColored(grey, "Last: %s", cs.lastEvent);
+            if (cvChanged) {
+                ConvoCam::Clamp();
+                changed = true;
+            }
+        }
+
         if (changed) {
             AmbientCam::Clamp();
             SaveINI();
@@ -1182,6 +1257,31 @@ namespace FreeCamMenu {
             a.furnDelay       = readFloat("Furniture", "fDelay", d.furnDelay);
             a.furnMoveCancels = readInt("Furniture", "bMoveCancels", d.furnMoveCancels ? 1 : 0) != 0;
             AmbientCam::Clamp();
+        }
+
+        // 0.16.0 conversation camera (code defaults when the section is missing).
+        {
+            auto&                      c = ConvoCam::Get();
+            const ConvoCam::Settings   d{};
+            c.enabled         = readInt("Conversation", "bEnabled", d.enabled ? 1 : 0) != 0;
+            c.thirdPersonOnly = readInt("Conversation", "bThirdPersonOnly", d.thirdPersonOnly ? 1 : 0) != 0;
+            c.blendIn         = readFloat("Conversation", "fBlendIn", d.blendIn);
+            c.blendOut        = readFloat("Conversation", "fBlendOut", d.blendOut);
+            c.shotSwitch      = readFloat("Conversation", "fShotSwitch", d.shotSwitch);
+            c.minShotSec      = readFloat("Conversation", "fMinShotSeconds", d.minShotSec);
+            c.distance        = readFloat("Conversation", "fDistance", d.distance);
+            c.shoulder        = readFloat("Conversation", "fShoulder", d.shoulder);
+            c.height          = readFloat("Conversation", "fHeight", d.height);
+            c.lookShift       = readFloat("Conversation", "fLookShift", d.lookShift);
+            c.fovNpc          = readFloat("Conversation", "fFovNpc", d.fovNpc);
+            c.fovWide         = readFloat("Conversation", "fFovWide", d.fovWide);
+            c.alternate       = readInt("Conversation", "bAlternate", d.alternate ? 1 : 0) != 0;
+            c.reverseKind     = readInt("Conversation", "iReverseKind", d.reverseKind);
+            c.swapSide        = readInt("Conversation", "bSwapSide", d.swapSide ? 1 : 0) != 0;
+            c.drift           = readFloat("Conversation", "fDrift", d.drift);
+            ConvoCam::Clamp();
+            SKSE::log::info("ConvoCam: conversation camera {} - {} shot, settle {:.1f} s, shot change {:.1f} s",
+                c.enabled ? "on" : "off", c.reverseKind == 1 ? "two-shot reverse" : "over-the-shoulder reverse", c.blendIn, c.shotSwitch);
         }
 
         // 0.12.0 walls for the automatic cameras (code defaults when the section is missing).

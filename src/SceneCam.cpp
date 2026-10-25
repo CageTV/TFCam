@@ -7,6 +7,7 @@
 #include "FreeCamMenu.h"
 #include "SlccBridge.h"
 #include "AmbientCam.h"
+#include "ConvoCam.h"
 
 #include <RE/I/INIPrefSettingCollection.h>
 #include <RE/I/INISettingCollection.h>
@@ -1982,7 +1983,7 @@ namespace SceneCam {
 
     bool OwnsMotion() {
         return s_mode == TFCAM_API::kModeOrbit || s_mode == TFCAM_API::kModeEye || s_mode == TFCAM_API::kModePreset ||
-               s_blend.active || AmbientCam::OwnsMotion();
+               s_blend.active || AmbientCam::OwnsMotion() || ConvoCam::OwnsMotion();
     }
 
     bool OnWheel(int a_dir) {

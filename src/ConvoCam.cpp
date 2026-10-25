@@ -1,0 +1,614 @@
+#include "ConvoCam.h"
+#include "CamCollision.h"
+#include "CellEntryCam.h"
+#include "FreeCamController.h"
+#include "FreeCamMenu.h"
+#include "SceneCam.h"
+#include "SceneTracker.h"
+#include "SlccBridge.h"
+
+#include <Windows.h>
+
+#include <algorithm>
+#include <atomic>
+#include <cmath>
+#include <cstring>
+#include <format>
+#include <mutex>
+#include <string>
+#include <thread>
+
+namespace ConvoCam {
+
+    namespace {
+        constexpr float kPi         = 3.14159265358979f;
+        constexpr float kPitchLimit = 1.55f;
+
+        Settings s_cfg;
+
+        // ---- math ------------------------------------------------------------------------------------------------
+        float WrapPi(float a) { return std::remainder(a, 2.0f * kPi); }
+
+        float SmoothStep(float x) {
+            x = std::clamp(x, 0.0f, 1.0f);
+            return x * x * (3.0f - 2.0f * x);
+        }
+
+        float ExpWeight(float dt, float halfLife) { return dt <= 0.0f ? 0.0f : 1.0f - std::exp(-0.69314718f * dt / halfLife); }
+
+        float Len2(float x, float y) { return std::sqrt(x * x + y * y); }
+
+        RE::NiPoint3 Mix(const RE::NiPoint3& a, const RE::NiPoint3& b, float w) {
+            return { a.x + (b.x - a.x) * w, a.y + (b.y - a.y) * w, a.z + (b.z - a.z) * w };
+        }
+
+        // Critically damped spring towards a target with a speed limit (the usual "smooth damp"). a_settle is about the time it
+        // takes to arrive. Frame-rate independent.
+        float SmoothDamp(float a_cur, float a_target, float& a_vel, float a_settle, float a_maxSpeed, float dt) {
+            if (dt <= 0.0f) return a_cur;
+            const float smoothTime = (std::max)(a_settle / 2.35f, 0.0001f);
+            const float omega      = 2.0f / smoothTime;
+            const float x          = omega * dt;
+            const float e          = 1.0f / (1.0f + x + 0.48f * x * x + 0.235f * x * x * x);
+            float       change     = a_cur - a_target;
+            const float original   = a_target;
+            const float maxChange  = a_maxSpeed * smoothTime;
+            change                 = std::clamp(change, -maxChange, maxChange);
+            const float target     = a_cur - change;
+            const float temp       = (a_vel + omega * change) * dt;
+            a_vel                  = (a_vel - omega * temp) * e;
+            float out              = target + (change + temp) * e;
+            if ((original - a_cur > 0.0f) == (out > original)) {
+                out   = original;
+                a_vel = 0.0f;
+            }
+            return out;
+        }
+
+        // The same on an angle: the short way round.
+        float SmoothDampAngle(float a_cur, float a_target, float& a_vel, float a_settle, float a_maxSpeed, float dt) {
+            const float d = WrapPi(a_target - a_cur);
+            return WrapPi(a_cur + SmoothDamp(0.0f, d, a_vel, a_settle, a_maxSpeed, dt));
+        }
+
+        // TFCam's convention: forward = (sin yaw cos pitch, cos yaw cos pitch, -sin pitch).
+        void LookAngles(const RE::NiPoint3& d, float& yaw, float& pitch) {
+            yaw   = std::atan2(d.x, d.y);
+            pitch = std::atan2(-d.z, std::hypot(d.x, d.y));
+        }
+
+        double Now() {
+            static const double freq = [] {
+                LARGE_INTEGER f;
+                ::QueryPerformanceFrequency(&f);
+                return static_cast<double>(f.QuadPart);
+            }();
+            LARGE_INTEGER t;
+            ::QueryPerformanceCounter(&t);
+            return static_cast<double>(t.QuadPart) / freq;
+        }
+
+        // Own frame time for the drive: capped at 0.1 s, 0 while the game is paused.
+        float FrameDt() {
+            static double s_last = 0.0;
+            const double  now    = Now();
+            float         dt     = s_last > 0.0 ? static_cast<float>(now - s_last) : 0.0f;
+            s_last               = now;
+            dt                   = std::clamp(dt, 0.0f, 0.1f);
+            auto* ui             = RE::UI::GetSingleton();
+            if (ui && ui->GameIsPaused()) dt = 0.0f;
+            return dt;
+        }
+
+        // ---- camera ------------------------------------------------------------------------------------------------
+        RE::PlayerCamera* Cam() { return RE::PlayerCamera::GetSingleton(); }
+
+        float GetFOV() {
+            auto* cam = Cam();
+            return cam ? cam->GetRuntimeData2().worldFOV : 0.0f;
+        }
+
+        void SetFOV(float fov) {
+            auto* cam = Cam();
+            if (cam && fov > 0.0f && std::isfinite(fov)) cam->GetRuntimeData2().worldFOV = fov;
+        }
+
+        struct Pose {
+            RE::NiPoint3 pos{};
+            float        pitch = 0.0f;
+            float        yaw   = 0.0f;
+            float        roll  = 0.0f;
+            float        fov   = 0.0f;
+        };
+
+        // The camera from before the session, in the player's frame (so it follows a player who moved).
+        struct PreShot {
+            float x = 0, y = 0, z = 0, yawRel = 0, pitch = 0, roll = 0, fov = 0;
+        };
+
+        Pose ReadPose(const RE::FreeCameraState* fcs) {
+            Pose p;
+            p.pos   = fcs->translation;
+            p.pitch = fcs->rotation.x;
+            p.yaw   = fcs->rotation.y;
+            p.roll  = FreeCam::GetRollRadians();
+            p.fov   = GetFOV();
+            return p;
+        }
+
+        void WritePose(RE::FreeCameraState* fcs, const Pose& p) {
+            fcs->translation = p.pos;
+            fcs->rotation.x  = std::clamp(p.pitch, -kPitchLimit, kPitchLimit);
+            fcs->rotation.y  = WrapPi(p.yaw);
+            FreeCam::SetRollRadians(p.roll);
+            SetFOV(p.fov);
+        }
+
+        Pose LerpPose(const Pose& a, const Pose& b, float w) {
+            Pose p;
+            p.pos   = Mix(a.pos, b.pos, w);
+            p.yaw   = a.yaw + WrapPi(b.yaw - a.yaw) * w;
+            p.pitch = a.pitch + (b.pitch - a.pitch) * w;
+            p.roll  = a.roll + WrapPi(b.roll - a.roll) * w;
+            p.fov   = a.fov + (b.fov - a.fov) * w;
+            return p;
+        }
+
+        PreShot ToPre(const Pose& p) {
+            auto*              player = RE::PlayerCharacter::GetSingleton();
+            const auto         a      = player->GetPosition();
+            const float        h      = player->GetAngleZ();
+            const RE::NiPoint3 fwd{ std::sin(h), std::cos(h), 0.0f };
+            const RE::NiPoint3 right{ std::cos(h), -std::sin(h), 0.0f };
+            const RE::NiPoint3 v{ p.pos.x - a.x, p.pos.y - a.y, p.pos.z - a.z };
+            PreShot            s;
+            s.x      = v.x * right.x + v.y * right.y;
+            s.y      = v.x * fwd.x + v.y * fwd.y;
+            s.z      = v.z;
+            s.yawRel = WrapPi(p.yaw - h);
+            s.pitch  = p.pitch;
+            s.roll   = p.roll;
+            s.fov    = p.fov;
+            return s;
+        }
+
+        Pose FromPre(const PreShot& s) {
+            auto*              player = RE::PlayerCharacter::GetSingleton();
+            const auto         a      = player->GetPosition();
+            const float        h      = player->GetAngleZ();
+            const RE::NiPoint3 fwd{ std::sin(h), std::cos(h), 0.0f };
+            const RE::NiPoint3 right{ std::cos(h), -std::sin(h), 0.0f };
+            Pose               p;
+            p.pos   = { a.x + right.x * s.x + fwd.x * s.y, a.y + right.y * s.x + fwd.y * s.y, a.z + s.z };
+            p.yaw   = WrapPi(h + s.yawRel);
+            p.pitch = s.pitch;
+            p.roll  = s.roll;
+            p.fov   = s.fov;
+            return p;
+        }
+
+        // ---- session ------------------------------------------------------------------------------------------------
+        enum class St { kOff, kStarting, kRunning, kReturning };
+        enum class Shot { kOverPlayer, kReverse };
+
+        struct Session {
+            St               st        = St::kOff;
+            double           startedAt = 0.0;
+            bool             havePre   = false;
+            PreShot          pre{};
+            RE::ObjectRefHandle speaker{};
+            std::string      speakerName;
+            // smoothed positions of the two speakers' eyes
+            bool         seeded = false;
+            RE::NiPoint3 player{}, npc{};
+            // the camera: cylindrical about the midpoint, plus the point it looks at
+            float        ang = 0, rad = 0, z = 0, fov = 0;
+            float        vAng = 0, vRad = 0, vZ = 0, vFov = 0;
+            RE::NiPoint3 look{};
+            RE::NiPoint3 vLook{};
+            Shot         shot      = Shot::kOverPlayer;
+            double       shotSince = 0.0;
+            float        settle    = 1.6f;  // seconds the damping takes to arrive (the entry is slower than a shot change)
+            float        clock     = 0.0f;
+            // return
+            bool  retFromSet = false;
+            Pose  retFrom{};
+            float retT   = 0.0f;
+            float retDur = 1.0f;
+        };
+        Session s_s;
+
+        std::mutex  s_statusLock;
+        MenuStatus  s_status{};
+        std::string s_lastEvent;
+        std::atomic<bool> s_tickQueued{ false };
+
+        void Event(std::string text) {
+            SKSE::log::info("ConvoCam: {}", text);
+            s_lastEvent = std::move(text);
+        }
+
+        void CopyStr(char* dst, std::size_t size, const std::string& src) {
+            const std::size_t n = (std::min)(src.size(), size - 1);
+            std::memcpy(dst, src.data(), n);
+            dst[n] = '\0';
+        }
+
+        RE::FreeCameraState* LiveFreeCam() {
+            auto* cam = Cam();
+            if (!cam || !cam->IsInFreeCameraMode() || !FreeCam::TFCamDriving()) return nullptr;
+            auto* state = cam->currentState.get();
+            return state ? static_cast<RE::FreeCameraState*>(state) : nullptr;
+        }
+
+        void ResetSession() { s_s = Session{}; }
+
+        // ---- the conversation ---------------------------------------------------------------------------------------
+        bool DialogueOpen() {
+            auto* mtm = RE::MenuTopicManager::GetSingleton();
+            auto* ui  = RE::UI::GetSingleton();
+            return mtm && ui && mtm->menuOpen && ui->IsMenuOpen("Dialogue Menu");
+        }
+
+        // The NPC is saying a line (the dialogue manager holds a current topic info only then).
+        bool NpcTalking() {
+            auto* mtm = RE::MenuTopicManager::GetSingleton();
+            return mtm && mtm->currentTopicInfo != nullptr;
+        }
+
+        RE::Actor* SpeakerActor() {
+            auto* mtm = RE::MenuTopicManager::GetSingleton();
+            if (!mtm) return nullptr;
+            auto ref = mtm->speaker.get();
+            auto* a  = ref ? ref->As<RE::Actor>() : nullptr;
+            return (a && !a->IsPlayerRef()) ? a : nullptr;
+        }
+
+        // Eye point of an actor: the head node when there is one, else a share of its height.
+        RE::NiPoint3 EyePoint(RE::Actor* a) {
+            const auto  pos    = a->GetPosition();
+            float       height = a->GetHeight();
+            if (!(height > 20.0f) || !std::isfinite(height)) height = 120.0f * std::clamp(a->GetScale(), 0.3f, 3.0f);
+            RE::NiPoint3 p{ pos.x, pos.y, pos.z + 0.93f * height };
+            if (auto* root = a->Get3D(false)) {
+                if (auto* head = root->GetObjectByName(RE::BSFixedString("NPC Head [Head]"))) {
+                    const auto h = head->world.translate;
+                    if (std::isfinite(h.x) && std::isfinite(h.y) && std::isfinite(h.z) && h.z > pos.z + 20.0f) p = h;
+                }
+            }
+            return p;
+        }
+
+        // nullptr = nothing in the way of the camera starting.
+        const char* StartBlock() {
+            auto* player = RE::PlayerCharacter::GetSingleton();
+            if (!player || !player->Is3DLoaded()) return "no player";
+            if (FreeCam::IsActive()) return "free camera is on";
+            if (SceneTracker::PlayerSceneActive()) return "player in a SexLab scene";
+            if (CellEntryCam::IsRunning()) return "cell-entry camera running";
+            if (player->IsDead()) return "dead";
+            if (!SpeakerActor()) return "no speaker";
+            auto* cam = Cam();
+            auto* st  = cam ? cam->currentState.get() : nullptr;
+            if (!st) return "no camera state";
+            using CS = RE::CameraStates;
+            if (st->id == CS::kThirdPerson) return nullptr;
+            if (st->id == CS::kFirstPerson && !s_cfg.thirdPersonOnly) return nullptr;
+            return "not in the third-person camera";
+        }
+
+        // ---- shots ----------------------------------------------------------------------------------------------------
+        struct Target {
+            RE::NiPoint3 pos;
+            RE::NiPoint3 look;
+            float        fov;
+        };
+
+        // Over the shoulder of a foreground speaker F, looking at T.
+        Target OverShoulder(const RE::NiPoint3& F, const RE::NiPoint3& T, float side) {
+            const float        d  = (std::max)(Len2(T.x - F.x, T.y - F.y), 30.0f);
+            const RE::NiPoint3 f{ (T.x - F.x) / d, (T.y - F.y) / d, 0.0f };
+            const RE::NiPoint3 r{ f.y, -f.x, 0.0f };
+            Target             t;
+            t.pos  = { F.x - f.x * s_cfg.distance + r.x * side * s_cfg.shoulder, F.y - f.y * s_cfg.distance + r.y * side * s_cfg.shoulder,
+                F.z + s_cfg.height };
+            t.look = { T.x - r.x * side * s_cfg.lookShift, T.y - r.y * side * s_cfg.lookShift, T.z - 3.0f };
+            t.fov  = s_cfg.fovNpc;
+            return t;
+        }
+
+        // Both speakers from the side.
+        Target TwoShot(const RE::NiPoint3& P, const RE::NiPoint3& N, float side) {
+            const float        d = (std::max)(Len2(N.x - P.x, N.y - P.y), 30.0f);
+            const RE::NiPoint3 f{ (N.x - P.x) / d, (N.y - P.y) / d, 0.0f };
+            const RE::NiPoint3 r{ f.y, -f.x, 0.0f };
+            const RE::NiPoint3 m = Mix(P, N, 0.5f);
+            Target             t;
+            const float        out = d * 0.5f + s_cfg.distance * 0.9f;
+            t.pos  = { m.x + r.x * side * out, m.y + r.y * side * out, m.z + s_cfg.height * 0.5f };
+            t.look = { m.x, m.y, m.z - 2.0f };
+            t.fov  = s_cfg.fovWide;
+            return t;
+        }
+
+        Target ShotTarget(Shot shot) {
+            const float side = s_cfg.swapSide ? -1.0f : 1.0f;
+            if (shot == Shot::kOverPlayer) return OverShoulder(s_s.player, s_s.npc, side);
+            return s_cfg.reverseKind == 1 ? TwoShot(s_s.player, s_s.npc, side) : OverShoulder(s_s.npc, s_s.player, side);
+        }
+
+        const char* ShotName(Shot shot) {
+            if (shot == Shot::kOverPlayer) return "over your shoulder";
+            return s_cfg.reverseKind == 1 ? "wide two-shot" : "over the NPC's shoulder";
+        }
+
+        // ---- start / return -------------------------------------------------------------------------------------------
+        void FinishReturn() {
+            SKSE::log::info("ConvoCam: giving the free camera back");
+            if (FreeCam::TFCamDriving()) SceneCam::NoteOwnLeave();
+            SlccBridge::LeaveFreeFly("Conversation camera");
+            ResetSession();
+        }
+
+        void BeginReturn(float dur, const char* why) {
+            if (s_s.st == St::kOff || s_s.st == St::kReturning) return;
+            if (!Cam() || !Cam()->IsInFreeCameraMode()) {
+                Event(std::format("{} - the free camera is already off", why));
+                ResetSession();
+                return;
+            }
+            if (dur <= 0.0f || !s_s.havePre || !LiveFreeCam()) {
+                Event(std::format("{} - camera back now", why));
+                FinishReturn();
+                return;
+            }
+            s_s.st         = St::kReturning;
+            s_s.retFromSet = false;
+            s_s.retT       = 0.0f;
+            s_s.retDur     = dur;
+            Event(std::format("{} - camera back over {:.1f} s", why, dur));
+        }
+
+        void Start() {
+            auto* spk = SpeakerActor();
+            if (!spk) return;
+            s_s               = Session{};
+            s_s.st            = St::kStarting;
+            s_s.startedAt     = Now();
+            s_s.speaker       = spk->CreateRefHandle();
+            s_s.speakerName   = spk->GetDisplayFullName() ? spk->GetDisplayFullName() : "";
+            Event(std::format("conversation with {} - camera starting", s_s.speakerName.empty() ? "an NPC" : s_s.speakerName));
+            SlccBridge::RequestEnterFreeFly("Conversation camera");
+        }
+
+        void PublishStatus(const char* block) {
+            MenuStatus st;
+            std::string state;
+            switch (s_s.st) {
+            case St::kOff: state = block ? std::string("waiting: ") + block : std::string("no conversation"); break;
+            case St::kStarting: state = "starting"; break;
+            case St::kRunning: state = "running"; break;
+            case St::kReturning: state = "handing the camera back"; break;
+            }
+            CopyStr(st.state, sizeof(st.state), state);
+            if (s_s.st == St::kRunning) CopyStr(st.shot, sizeof(st.shot), ShotName(s_s.shot));
+            CopyStr(st.speaker, sizeof(st.speaker), s_s.speakerName);
+            CopyStr(st.lastEvent, sizeof(st.lastEvent), s_lastEvent);
+            std::lock_guard lock(s_statusLock);
+            s_status = st;
+        }
+
+        void Tick() {
+            s_tickQueued = false;
+            auto* player = RE::PlayerCharacter::GetSingleton();
+            const double now = Now();
+            if (!player || !player->Is3DLoaded()) {
+                if (s_s.st != St::kOff) ResetSession();
+                return;
+            }
+            const bool talking = s_cfg.enabled && DialogueOpen();
+            const char* block  = nullptr;
+            if (s_s.st == St::kOff) {
+                if (talking) {
+                    block = StartBlock();
+                    if (!block) Start();
+                }
+                PublishStatus(block);
+                return;
+            }
+            const bool free = Cam() && Cam()->IsInFreeCameraMode();
+            if (s_s.st == St::kStarting && !free && now - s_s.startedAt > 2.0) {
+                Event("the free camera never started");
+                ResetSession();
+                return;
+            }
+            if (s_s.st != St::kStarting && !free) {
+                Event("the free camera was left");
+                ResetSession();
+                return;
+            }
+            if (s_s.st == St::kStarting || s_s.st == St::kRunning) {
+                if (!talking) {
+                    BeginReturn(s_cfg.blendOut, s_cfg.enabled ? "the conversation ended" : "turned off");
+                } else if (!SpeakerActor() || SceneTracker::PlayerSceneActive()) {
+                    BeginReturn(0.6f, "the speaker is gone or a scene started");
+                }
+            }
+            PublishStatus(nullptr);
+        }
+
+        void QueueTick() {
+            if (s_tickQueued.exchange(true)) return;
+            if (auto* tasks = SKSE::GetTaskInterface()) {
+                tasks->AddTask([] { Tick(); });
+            } else {
+                s_tickQueued = false;
+            }
+        }
+
+        // ---- per frame ------------------------------------------------------------------------------------------------
+        void SeedCamera(RE::FreeCameraState* fcs) {
+            const Pose cur = ReadPose(fcs);
+            const auto m   = Mix(s_s.player, s_s.npc, 0.5f);
+            s_s.ang        = std::atan2(cur.pos.x - m.x, cur.pos.y - m.y);
+            s_s.rad        = Len2(cur.pos.x - m.x, cur.pos.y - m.y);
+            s_s.z          = cur.pos.z;
+            s_s.fov        = cur.fov > 1.0f ? cur.fov : 60.0f;
+            const float sep = (std::max)(Len2(s_s.npc.x - s_s.player.x, s_s.npc.y - s_s.player.y), 120.0f);
+            const RE::NiPoint3 fwd{ std::sin(cur.yaw) * std::cos(cur.pitch), std::cos(cur.yaw) * std::cos(cur.pitch), -std::sin(cur.pitch) };
+            s_s.look  = { cur.pos.x + fwd.x * sep, cur.pos.y + fwd.y * sep, cur.pos.z + fwd.z * sep };
+            s_s.vAng = s_s.vRad = s_s.vZ = s_s.vFov = 0.0f;
+            s_s.vLook                                  = {};
+            s_s.shot                                   = Shot::kOverPlayer;
+            s_s.shotSince                              = Now();
+            s_s.settle                                 = s_cfg.blendIn;
+            s_s.clock                                  = 0.0f;
+        }
+
+        void DriveReturn(RE::FreeCameraState* fcs, float dt) {
+            if (!s_s.retFromSet) {
+                s_s.retFrom    = ReadPose(fcs);
+                s_s.retFromSet = true;
+            }
+            s_s.retT += dt;
+            const float w = s_s.retDur > 0.0f ? SmoothStep(s_s.retT / s_s.retDur) : 1.0f;
+            WritePose(fcs, LerpPose(s_s.retFrom, FromPre(s_s.pre), w));
+            if (auto* player = RE::PlayerCharacter::GetSingleton()) CamCollision::Request(EyePoint(player), "conversation camera, back to the normal camera");
+            if (w >= 1.0f) FinishReturn();
+        }
+
+        void DriveRun(RE::FreeCameraState* fcs, float dt) {
+            auto* player = RE::PlayerCharacter::GetSingleton();
+            auto  ref    = s_s.speaker.get();
+            auto* npc    = ref ? ref->As<RE::Actor>() : nullptr;
+            if (!player || !npc) {
+                BeginReturn(0.6f, "the speaker is gone");
+                return;
+            }
+            const RE::NiPoint3 pRaw = EyePoint(player);
+            const RE::NiPoint3 nRaw = EyePoint(npc);
+            if (!s_s.seeded) {
+                s_s.player = pRaw;
+                s_s.npc    = nRaw;
+                s_s.seeded = true;
+                SeedCamera(fcs);
+            } else {
+                const float w = ExpWeight(dt, 0.25f);
+                s_s.player    = Mix(s_s.player, pRaw, w);
+                s_s.npc       = Mix(s_s.npc, nRaw, w);
+            }
+            s_s.clock += dt;
+
+            // Which shot: over the player's shoulder while the NPC talks, the reverse while it is the player's turn - never
+            // sooner than minShotSec after the last change.
+            const double now     = Now();
+            const Shot   wanted  = (s_cfg.alternate && !NpcTalking() && s_s.st == St::kRunning && s_s.clock > 0.5f) ? Shot::kReverse : Shot::kOverPlayer;
+            if (wanted != s_s.shot && now - s_s.shotSince >= s_cfg.minShotSec) {
+                s_s.shot      = wanted;
+                s_s.shotSince = now;
+                s_s.settle    = s_cfg.shotSwitch;
+                Event(std::format("shot: {}", ShotName(wanted)));
+            } else if (s_s.settle != s_cfg.shotSwitch && now - s_s.shotSince > s_cfg.blendIn) {
+                s_s.settle = s_cfg.shotSwitch;  // the entry is over: later changes use the shot-change time
+            }
+
+            const Target t = ShotTarget(s_s.shot);
+            const auto   m = Mix(s_s.player, s_s.npc, 0.5f);
+
+            // The wanted camera in cylindrical coordinates about the midpoint; each coordinate is damped, so a change of shot
+            // swings round the pair instead of cutting through them.
+            const float tAng = std::atan2(t.pos.x - m.x, t.pos.y - m.y);
+            const float tRad = Len2(t.pos.x - m.x, t.pos.y - m.y);
+            const float settle = (std::max)(s_s.settle, 0.2f);
+            s_s.ang  = SmoothDampAngle(s_s.ang, tAng, s_s.vAng, settle, 1.3f, dt);
+            s_s.rad  = SmoothDamp(s_s.rad, tRad, s_s.vRad, settle, 240.0f, dt);
+            s_s.z    = SmoothDamp(s_s.z, t.pos.z, s_s.vZ, settle, 150.0f, dt);
+            s_s.fov  = SmoothDamp(s_s.fov, t.fov, s_s.vFov, settle, 22.0f, dt);
+            s_s.look.x = SmoothDamp(s_s.look.x, t.look.x, s_s.vLook.x, settle, 300.0f, dt);
+            s_s.look.y = SmoothDamp(s_s.look.y, t.look.y, s_s.vLook.y, settle, 300.0f, dt);
+            s_s.look.z = SmoothDamp(s_s.look.z, t.look.z, s_s.vLook.z, settle, 300.0f, dt);
+
+            Pose p;
+            p.pos = { m.x + std::sin(s_s.ang) * s_s.rad, m.y + std::cos(s_s.ang) * s_s.rad, s_s.z };
+            // A slow handheld sway on the point it looks at.
+            RE::NiPoint3 look = s_s.look;
+            if (s_cfg.drift > 0.0f) {
+                const float c = s_s.clock;
+                look.x += std::sin(c * 0.37f) * 4.0f * s_cfg.drift;
+                look.y += std::cos(c * 0.29f) * 4.0f * s_cfg.drift;
+                look.z += std::sin(c * 0.51f + 1.0f) * 2.5f * s_cfg.drift;
+            }
+            LookAngles({ look.x - p.pos.x, look.y - p.pos.y, look.z - p.pos.z }, p.yaw, p.pitch);
+            p.roll = 0.0f;
+            p.fov  = s_s.fov;
+            WritePose(fcs, p);
+            CamCollision::Request(look, "conversation camera");
+        }
+    }
+
+    Settings& Get() { return s_cfg; }
+
+    void Clamp() {
+        auto range = [](float& v, float lo, float hi, float def) { v = std::isfinite(v) ? std::clamp(v, lo, hi) : def; };
+        range(s_cfg.blendIn, 0.3f, 6.0f, 1.6f);
+        range(s_cfg.blendOut, 0.0f, 6.0f, 1.4f);
+        range(s_cfg.shotSwitch, 0.3f, 6.0f, 1.5f);
+        range(s_cfg.minShotSec, 0.5f, 15.0f, 2.5f);
+        range(s_cfg.distance, 40.0f, 400.0f, 115.0f);
+        range(s_cfg.shoulder, -100.0f, 100.0f, 36.0f);
+        range(s_cfg.height, -40.0f, 80.0f, 10.0f);
+        range(s_cfg.lookShift, -80.0f, 80.0f, 24.0f);
+        range(s_cfg.fovNpc, 20.0f, 100.0f, 46.0f);
+        range(s_cfg.fovWide, 20.0f, 110.0f, 56.0f);
+        range(s_cfg.drift, 0.0f, 3.0f, 1.0f);
+        s_cfg.reverseKind = std::clamp(s_cfg.reverseKind, 0, 1);
+    }
+
+    void Install() {
+        Clamp();
+        // A plain thread paces the checks (a task that re-queues itself would spin inside one frame).
+        std::thread([] {
+            while (true) {
+                ::Sleep(100);
+                QueueTick();
+            }
+        }).detach();
+        SKSE::log::info("ConvoCam: ready - conversation camera {}", s_cfg.enabled ? "on" : "off");
+    }
+
+    void Drive(RE::FreeCameraState* fcs, bool driving) {
+        const float dt = FrameDt();
+        if (!fcs || s_s.st == St::kOff) return;
+        if (!driving) {
+            Event("another camera took the free camera");
+            ResetSession();
+            return;
+        }
+        // The camera from before the session = where the free camera started (the first frame it updates).
+        if (!s_s.havePre) {
+            s_s.pre     = ToPre(ReadPose(fcs));
+            s_s.havePre = true;
+        }
+        if (s_s.st == St::kReturning) {
+            DriveReturn(fcs, dt);
+            return;
+        }
+        if (s_s.st == St::kStarting) {
+            s_s.st = St::kRunning;
+            Event("conversation camera running");
+        }
+        DriveRun(fcs, dt);
+    }
+
+    bool OwnsMotion() { return s_s.st == St::kRunning || s_s.st == St::kReturning || s_s.st == St::kStarting; }
+
+    void OnGameLoad(const char* a_why) {
+        if (s_s.st != St::kOff) Event(std::format("{} - session dropped", a_why));
+        ResetSession();
+    }
+
+    MenuStatus GetMenuStatus() {
+        std::lock_guard lock(s_statusLock);
+        return s_status;
+    }
+}

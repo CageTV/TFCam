@@ -80,6 +80,7 @@ add_commonlibsse_plugin(${PROJECT_NAME} MINIMUM_SKSE_VERSION 0.0.0 SOURCES
     src/CellEntryCam.cpp
     src/TFCamAPI.cpp
     src/SceneCam.cpp
+    src/ConvoCam.cpp
     src/SceneShots.cpp
     src/AmbientCam.cpp
     src/CamCollision.cpp

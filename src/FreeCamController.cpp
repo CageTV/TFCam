@@ -9,6 +9,7 @@
 #include "CellEntryCam.h"
 #include "SceneCam.h"
 #include "AmbientCam.h"
+#include "ConvoCam.h"
 #include "CamCollision.h"
 
 #include <RE/I/INISettingCollection.h>
@@ -815,6 +816,7 @@ namespace FreeCam {
             if (a_this) {
                 SceneCam::Drive(AsFreeCam(a_this), prePitch, preYaw, driving);
                 AmbientCam::Drive(AsFreeCam(a_this), driving);  // 0.11.0: idle / furniture camera, after the Scene Camera
+                ConvoCam::Drive(AsFreeCam(a_this), driving);    // 0.16.0: conversation camera
                 CamCollision::Apply(AsFreeCam(a_this), driving);  // 0.12.0: walls, for whatever an automatic camera wrote
             }
 
