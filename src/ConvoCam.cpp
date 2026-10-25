@@ -195,6 +195,8 @@ namespace ConvoCam {
             St               st        = St::kOff;
             double           startedAt = 0.0;
             bool             havePre   = false;
+            bool             dialogueSeen = false;  // the Dialogue Menu has been open since this session armed
+            double           armedAt   = 0.0;
             bool             firstPerson = false;  // the game's camera was first person when the conversation began
             PreShot          pre{};
             RE::ObjectRefHandle speaker{};
@@ -280,24 +282,6 @@ namespace ConvoCam {
             return p;
         }
 
-        // nullptr = nothing in the way of the camera starting.
-        const char* StartBlock() {
-            auto* player = RE::PlayerCharacter::GetSingleton();
-            if (!player || !player->Is3DLoaded()) return "no player";
-            if (FreeCam::IsActive()) return "free camera is on";
-            if (SceneTracker::PlayerSceneActive()) return "player in a SexLab scene";
-            if (CellEntryCam::IsRunning()) return "cell-entry camera running";
-            if (player->IsDead()) return "dead";
-            if (!SpeakerActor()) return "no speaker";
-            auto* cam = Cam();
-            auto* st  = cam ? cam->currentState.get() : nullptr;
-            if (!st) return "no camera state";
-            using CS = RE::CameraStates;
-            if (st->id == CS::kThirdPerson) return nullptr;
-            if (st->id == CS::kFirstPerson && !s_cfg.thirdPersonOnly) return nullptr;
-            return "not in the third-person camera";
-        }
-
         // ---- player controls ------------------------------------------------------------------------------------------
         // The engine keeps ONE stored copy of the player's enabled controls (ControlMap::storedControls): a menu stores them
         // and gives them back when it closes, and so does the free camera. A free camera that begins while the Dialogue Menu is
@@ -341,16 +325,15 @@ namespace ConvoCam {
             }
         }
 
-        // Before the free camera ends: the stored copy it gives back is the gameplay one.
-        void StoreGameplayControls() {
-            if (!s_haveControls) return;
-            if (auto* stored = StoredControls()) {
-                if (*stored != s_gameplayControls) {
-                    SKSE::log::info("ConvoCam: stored controls {:#x} -> {:#x} before the free camera ends", *stored, s_gameplayControls);
-                    *stored = s_gameplayControls;
-                }
-            }
-            s_checkControlsUntil = Now() + 3.0;
+        // For the log: what the control map holds at a moment of the session.
+        void LogControls(const char* a_when) {
+            auto* cm = RE::ControlMap::GetSingleton();
+            if (!cm) return;
+            const auto& rt = cm->GetRuntimeData();
+            std::string stack;
+            for (const auto id : rt.contextPriorityStack) stack += std::format("{} ", static_cast<int>(id));
+            SKSE::log::info("ConvoCam: controls {} - enabled {:#x} stored {:#x}, context stack [ {}], ignoreKeyboardMouse {}", a_when,
+                rt.enabledControls.underlying(), rt.storedControls.underlying(), stack, rt.ignoreKeyboardMouse);
         }
 
         // After it: anything the player had in plain gameplay and does not have now is given back (never taken away).
@@ -442,7 +425,8 @@ namespace ConvoCam {
         void FinishReturn() {
             SKSE::log::info("ConvoCam: giving the free camera back");
             if (FreeCam::TFCamDriving()) SceneCam::NoteOwnLeave();
-            StoreGameplayControls();
+            LogControls("before the free camera ends");
+            s_checkControlsUntil = Now() + 3.0;
             SlccBridge::LeaveFreeFly("Conversation camera");
             ResetSession();
         }
@@ -466,18 +450,75 @@ namespace ConvoCam {
             Event(std::format("{} - camera back over {:.1f} s", why, dur));
         }
 
-        void Start() {
-            auto* spk = SpeakerActor();
+        // The free camera has to begin BEFORE the Dialogue Menu opens and end AFTER it closes. The engine keeps one stored copy of the
+        // player's controls and the input contexts as a stack, so the menu and the free camera must nest, not interleave: a free
+        // camera that began under the open menu ended with the menu's reduced controls and left the player unable to move
+        // (2026-10-24). So the session arms on the player's activation of the NPC (TESActivateEvent), a moment before the dialogue
+        // opens, and gives the camera back if no dialogue comes.
+        void Arm(RE::Actor* spk) {
             if (!spk) return;
-            s_s               = Session{};
-            s_s.st            = St::kStarting;
-            s_s.startedAt     = Now();
-            s_s.speaker       = spk->CreateRefHandle();
+            s_s             = Session{};
+            s_s.st          = St::kStarting;
+            s_s.startedAt   = Now();
+            s_s.armedAt     = s_s.startedAt;
+            s_s.speaker     = spk->CreateRefHandle();
             if (auto* cam = Cam(); cam && cam->currentState) s_s.firstPerson = cam->currentState->id == RE::CameraStates::kFirstPerson;
-            s_s.speakerName   = spk->GetDisplayFullName() ? spk->GetDisplayFullName() : "";
-            Event(std::format("conversation with {} - camera starting", s_s.speakerName.empty() ? "an NPC" : s_s.speakerName));
+            const char* nm  = spk->GetDisplayFullName();
+            s_s.speakerName = nm ? nm : "";
+            Event(std::format("you activated {} - camera starting", s_s.speakerName.empty() ? "an NPC" : s_s.speakerName));
+            LogControls("before the free camera begins");
             SlccBridge::RequestEnterFreeFly("Conversation camera");
         }
+
+        // nullptr = nothing in the way of arming (a_actor: the NPC the player just activated).
+        const char* ArmBlock(RE::Actor* a_actor) {
+            auto* player = RE::PlayerCharacter::GetSingleton();
+            if (!s_cfg.enabled) return "off";
+            if (s_s.st != St::kOff) return "a session is running";
+            if (!player || !a_actor || a_actor->IsPlayerRef()) return "not an NPC";
+            if (a_actor->IsDead() || a_actor->IsInCombat() || player->IsInCombat() || a_actor->IsHostileToActor(player)) return "dead / hostile / in combat";
+            if (player->IsSneaking()) return "sneaking (pickpocket)";
+            if (DialogueOpen()) return "a dialogue is open already";
+            if (!PlainGameplay()) return "a menu is open";
+            if (FreeCam::IsActive()) return "free camera is on";
+            if (SceneTracker::PlayerSceneActive()) return "player in a SexLab scene";
+            if (CellEntryCam::IsRunning()) return "cell-entry camera running";
+            auto* cam = Cam();
+            auto* st  = cam ? cam->currentState.get() : nullptr;
+            if (!st) return "no camera state";
+            using CS = RE::CameraStates;
+            if (st->id == CS::kThirdPerson) return nullptr;
+            if (st->id == CS::kFirstPerson && !s_cfg.thirdPersonOnly) return nullptr;
+            return "not in the third-person camera";
+        }
+
+        // The player activated something: an NPC about to talk? (Game thread; the work runs on the main thread.)
+        class ActivateSink final : public RE::BSTEventSink<RE::TESActivateEvent> {
+        public:
+            static ActivateSink* Get() {
+                static ActivateSink s;
+                return &s;
+            }
+            RE::BSEventNotifyControl ProcessEvent(const RE::TESActivateEvent* evt, RE::BSTEventSource<RE::TESActivateEvent>*) override {
+                if (!evt || !s_cfg.enabled || !evt->actionRef || !evt->actionRef->IsPlayerRef() || !evt->objectActivated)
+                    return RE::BSEventNotifyControl::kContinue;
+                auto* actor = evt->objectActivated->As<RE::Actor>();
+                if (!actor) return RE::BSEventNotifyControl::kContinue;
+                const auto handle = actor->CreateRefHandle();
+                if (auto* tasks = SKSE::GetTaskInterface()) {
+                    tasks->AddTask([handle] {
+                        auto  ref = handle.get();
+                        auto* a   = ref ? ref->As<RE::Actor>() : nullptr;
+                        if (const char* block = ArmBlock(a)) {
+                            SKSE::log::info("ConvoCam: activation of {} ignored - {}", a ? (a->GetDisplayFullName() ? a->GetDisplayFullName() : "an actor") : "?", block);
+                            return;
+                        }
+                        Arm(a);
+                    });
+                }
+                return RE::BSEventNotifyControl::kContinue;
+            }
+        };
 
         void PublishStatus(const char* block) {
             MenuStatus st;
@@ -485,7 +526,7 @@ namespace ConvoCam {
             switch (s_s.st) {
             case St::kOff: state = block ? std::string("waiting: ") + block : std::string("no conversation"); break;
             case St::kStarting: state = "starting"; break;
-            case St::kRunning: state = "running"; break;
+            case St::kRunning: state = s_s.dialogueSeen ? "running" : "waiting for the dialogue to open"; break;
             case St::kReturning: state = "handing the camera back"; break;
             }
             CopyStr(st.state, sizeof(st.state), state);
@@ -504,17 +545,16 @@ namespace ConvoCam {
                 if (s_s.st != St::kOff) ResetSession();
                 return;
             }
-            const bool talking = s_cfg.enabled && DialogueOpen();
-            const char* block  = nullptr;
             if (s_s.st == St::kOff) {
                 RememberControls();
                 CheckControlsAfter();
-                if (talking) {
-                    block = StartBlock();
-                    if (!block) Start();
-                }
-                PublishStatus(block);
+                PublishStatus(s_cfg.enabled ? nullptr : "off");
                 return;
+            }
+            const bool talking = DialogueOpen();
+            if (talking && !s_s.dialogueSeen) {
+                s_s.dialogueSeen = true;
+                Event("the dialogue opened");
             }
             const bool free = Cam() && Cam()->IsInFreeCameraMode();
             if (s_s.st == St::kStarting && !free && now - s_s.startedAt > 2.0) {
@@ -528,10 +568,16 @@ namespace ConvoCam {
                 return;
             }
             if (s_s.st == St::kStarting || s_s.st == St::kRunning) {
-                if (!talking) {
-                    BeginReturn(s_cfg.blendOut, s_cfg.enabled ? "the conversation ended" : "turned off");
-                } else if (!SpeakerActor() || SceneTracker::PlayerSceneActive()) {
-                    BeginReturn(0.6f, "the speaker is gone or a scene started");
+                if (!s_cfg.enabled) {
+                    BeginReturn(s_cfg.blendOut, "turned off");
+                } else if (s_s.dialogueSeen && !talking) {
+                    BeginReturn(s_cfg.blendOut, "the conversation ended");
+                } else if (!s_s.dialogueSeen && now - s_s.armedAt > 2.5) {
+                    BeginReturn(0.8f, "no dialogue opened");
+                } else if (!SpeakerActor() && s_s.dialogueSeen) {
+                    BeginReturn(0.6f, "the speaker is gone");
+                } else if (SceneTracker::PlayerSceneActive()) {
+                    BeginReturn(0.6f, "a scene started");
                 }
             }
             PublishStatus(nullptr);
@@ -602,7 +648,7 @@ namespace ConvoCam {
             // Which shot: over the player's shoulder while the NPC talks, the reverse while it is the player's turn - never
             // sooner than minShotSec after the last change.
             const double now     = Now();
-            const Shot   wanted  = (s_cfg.alternate && !NpcTalking() && s_s.st == St::kRunning && s_s.clock > 0.5f) ? Shot::kReverse : Shot::kOverPlayer;
+            const Shot   wanted  = (s_cfg.alternate && s_s.dialogueSeen && DialogueOpen() && !NpcTalking() && s_s.clock > 0.5f) ? Shot::kReverse : Shot::kOverPlayer;
             if (wanted != s_s.shot && now - s_s.shotSince >= s_cfg.minShotSec) {
                 s_s.shot      = wanted;
                 s_s.shotSince = now;
@@ -673,6 +719,7 @@ namespace ConvoCam {
                 QueueTick();
             }
         }).detach();
+        if (auto* holder = RE::ScriptEventSourceHolder::GetSingleton()) holder->AddEventSink<RE::TESActivateEvent>(ActivateSink::Get());
         SKSE::log::info("ConvoCam: ready - conversation camera {}", s_cfg.enabled ? "on" : "off");
     }
 
