@@ -489,9 +489,6 @@ namespace ConvoCam {
             if (!player || !a_actor || a_actor->IsPlayerRef()) return "not an NPC";
             if (a_actor->IsDead() || a_actor->IsInCombat() || player->IsInCombat() || a_actor->IsHostileToActor(player)) return "dead / hostile / in combat";
             if (player->IsSneaking()) return "sneaking (pickpocket)";
-            // An NPC in a scene (talking to another NPC, a quest scene) needs the game a moment to stop the scene before the
-            // dialogue opens; a free camera begun in that moment kept it from opening at all (Sven and his mother, 2026-10-24).
-            if (a_actor->GetCurrentScene()) return "the NPC is in a scene";
             if (DialogueOpen()) return "a dialogue is open already";
             if (!PlainGameplay()) return "a menu is open";
             if (FreeCam::IsActive()) return "free camera is on";
@@ -522,11 +519,8 @@ namespace ConvoCam {
                 const auto arm    = [handle] {
                     auto  ref = handle.get();
                     auto* a   = ref ? ref->As<RE::Actor>() : nullptr;
-                    if (const char* block = ArmBlock(a)) {
-                        SKSE::log::info("ConvoCam: activation of {} ignored - {}", a ? (a->GetDisplayFullName() ? a->GetDisplayFullName() : "an actor") : "?", block);
-                        return;
-                    }
-                    Arm(a);
+                    // The camera starts from the Activate release (BeginPending); this event only logs.
+                    SKSE::log::info("ConvoCam: activation event for {}", a ? (a->GetDisplayFullName() ? a->GetDisplayFullName() : "an actor") : "?");
                 };
                 // Right here when this is the game's own thread: the dialogue opens within a frame of the activation, and a task
                 // queued for the next frame came after it for most NPCs (2026-10-24).
@@ -868,6 +862,10 @@ namespace ConvoCam {
         SKSE::log::info("ConvoCam: after the release ({:.0f} ms after the press) - dialogue manager: menuOpen {}, speaker {}, greeting {}, topic info {}",
             (Now() - s_pendingAt) * 1000.0, mtm ? mtm->menuOpen : false, mtm && mtm->speaker.get() ? "set" : "none",
             mtm ? mtm->isGreetingPlayer : false, mtm && mtm->currentTopicInfo ? "set" : "none");
+        if (!mtm || !mtm->menuOpen) {  // a bark, or a scene the game is still stopping: no dialogue to film
+            SKSE::log::info("ConvoCam: no dialogue started by the release - not filming");
+            return;
+        }
         if (const char* block = ArmBlock(a)) {  // the release itself may have changed things (a dialogue already open, a menu)
             SKSE::log::info("ConvoCam: not armed after the release: {}", block);
             return;
