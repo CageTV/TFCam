@@ -795,19 +795,30 @@ namespace ConvoCam {
 
     bool OwnsMotion() { return s_s.st == St::kRunning || s_s.st == St::kReturning || s_s.st == St::kStarting; }
 
-    bool OnActivatePress(RE::ButtonEvent* a_event) {
-        if (!a_event || !s_cfg.enabled || s_s.st != St::kOff || !a_event->IsDown()) return false;
+    RE::ObjectRefHandle ActivatePressTarget(RE::ButtonEvent* a_event) {
+        if (!a_event || !s_cfg.enabled || s_s.st != St::kOff || !a_event->IsDown()) return {};
         auto* pick = RE::CrosshairPickData::GetSingleton();
-        if (!pick) return false;
-        auto ref = pick->GetActiveTarget().get();
-        auto* a  = ref ? ref->As<RE::Actor>() : nullptr;
-        if (!a) return false;
+        if (!pick) return {};
+        const auto handle = pick->GetActiveTarget();
+        auto       ref    = handle.get();
+        auto*      a      = ref ? ref->As<RE::Actor>() : nullptr;
+        if (!a) return {};
         if (const char* block = ArmBlock(a)) {
             SKSE::log::info("ConvoCam: activate pressed on {} - not armed: {}", a->GetDisplayFullName() ? a->GetDisplayFullName() : "an actor", block);
-            return false;
+            return {};
+        }
+        return handle;
+    }
+
+    void BeginForActivation(RE::ObjectRefHandle a_target) {
+        auto  ref = a_target.get();
+        auto* a   = ref ? ref->As<RE::Actor>() : nullptr;
+        if (!a) return;
+        if (const char* block = ArmBlock(a)) {  // the press itself may have changed things (a dialogue already open, a menu)
+            SKSE::log::info("ConvoCam: not armed after the press: {}", block);
+            return;
         }
         Arm(a);
-        return s_s.st == St::kStarting;
     }
 
     void OnGameLoad(const char* a_why) {
