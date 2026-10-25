@@ -556,6 +556,26 @@ namespace ConvoCam {
             s_status = st;
         }
 
+        // Passive diagnostics (whatever the setting): after every Activate press on an NPC, log whether the dialogue opens.
+        struct PressWatch {
+            double      at = 0.0;
+            int         stage = 0;  // 0 = idle, 1..3 = next check
+            std::string who;
+        };
+        PressWatch s_watch;
+
+        void RunPressWatch(double a_now) {
+            if (s_watch.stage == 0) return;
+            static const double k_at[] = { 0.0, 0.3, 1.0, 2.5 };
+            if (a_now - s_watch.at < k_at[s_watch.stage]) return;
+            auto* mtm = RE::MenuTopicManager::GetSingleton();
+            auto* ui  = RE::UI::GetSingleton();
+            SKSE::log::info("ConvoCam: watch +{:.1f}s after pressing on {} - dialogue menu {}, manager menuOpen {}, speaker {}, topic info {}, camera session {}",
+                k_at[s_watch.stage], s_watch.who, ui && ui->IsMenuOpen("Dialogue Menu") ? "OPEN" : "closed", mtm ? mtm->menuOpen : false,
+                mtm && mtm->speaker.get() ? "set" : "none", mtm && mtm->currentTopicInfo ? "set" : "none", s_s.st == St::kOff ? "off" : "active");
+            if (++s_watch.stage > 3) s_watch.stage = 0;
+        }
+
         void Tick() {
             s_tickQueued = false;
             auto* player = RE::PlayerCharacter::GetSingleton();
@@ -564,6 +584,7 @@ namespace ConvoCam {
                 if (s_s.st != St::kOff) ResetSession();
                 return;
             }
+            RunPressWatch(now);
             if (s_s.st == St::kOff) {
                 RememberControls();
                 CheckControlsAfter();
@@ -799,6 +820,20 @@ namespace ConvoCam {
     bool OwnsMotion() { return s_s.st == St::kRunning || s_s.st == St::kReturning || s_s.st == St::kStarting; }
 
     RE::ObjectRefHandle ActivatePressTarget(RE::ButtonEvent* a_event) {
+        if (a_event && a_event->IsDown()) {  // passive: what did this press land on, and does the dialogue open
+            if (auto* pk = RE::CrosshairPickData::GetSingleton()) {
+                auto  r  = pk->GetActiveTarget().get();
+                auto* pa = r ? r->As<RE::Actor>() : nullptr;
+                if (pa) {
+                    const char* nm = pa->GetDisplayFullName();
+                    s_watch.who    = nm ? nm : "an actor";
+                    s_watch.who += pa->GetCurrentScene() ? " (in a scene)" : "";
+                    s_watch.at     = Now();
+                    s_watch.stage  = 1;
+                    SKSE::log::info("ConvoCam: press on {} - conversation camera {}", s_watch.who, s_cfg.enabled ? "on" : "off");
+                }
+            }
+        }
         if (!a_event || !s_cfg.enabled || s_s.st != St::kOff || !a_event->IsDown()) return {};
         auto* pick = RE::CrosshairPickData::GetSingleton();
         if (!pick) return {};
