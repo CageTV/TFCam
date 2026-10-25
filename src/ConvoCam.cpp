@@ -195,6 +195,7 @@ namespace ConvoCam {
             St               st        = St::kOff;
             double           startedAt = 0.0;
             bool             havePre   = false;
+            bool             firstPerson = false;  // the game's camera was first person when the conversation began
             PreShot          pre{};
             RE::ObjectRefHandle speaker{};
             std::string      speakerName;
@@ -297,6 +298,101 @@ namespace ConvoCam {
             return "not in the third-person camera";
         }
 
+        // ---- player controls ------------------------------------------------------------------------------------------
+        // The engine keeps ONE stored copy of the player's enabled controls (ControlMap::storedControls): a menu stores them
+        // and gives them back when it closes, and so does the free camera. A free camera that begins while the Dialogue Menu is
+        // open stores the dialogue's already-reduced controls over the dialogue's own copy; when the dialogue closes and the
+        // free camera ends after it, the reduced set is what comes back - the player cannot move afterwards (2026-10-24).
+        // So the controls as they are in plain gameplay are remembered, written back as the stored copy just before the free
+        // camera ends, and checked for a while after.
+        std::uint32_t s_gameplayControls = 0;
+        bool          s_haveControls     = false;
+        double        s_checkControlsUntil = 0.0;
+
+        std::uint32_t* EnabledControls() {
+            auto* cm = RE::ControlMap::GetSingleton();
+            return cm ? reinterpret_cast<std::uint32_t*>(&cm->GetRuntimeData().enabledControls) : nullptr;
+        }
+
+        std::uint32_t* StoredControls() {
+            auto* cm = RE::ControlMap::GetSingleton();
+            return cm ? reinterpret_cast<std::uint32_t*>(&cm->GetRuntimeData().storedControls) : nullptr;
+        }
+
+        bool PlainGameplay() {
+            auto* ui = RE::UI::GetSingleton();
+            if (!ui || ui->GameIsPaused()) return false;
+            for (const char* name : { "Dialogue Menu", "Cursor Menu", "Console", "Loading Menu", "MainMenu", "BarterMenu", "ContainerMenu",
+                                      "GiftMenu", "Journal Menu", "MapMenu", "InventoryMenu", "MagicMenu", "StatsMenu", "LevelUp Menu",
+                                      "Sleep/Wait Menu", "MessageBoxMenu", "TweenMenu", "Lockpicking Menu", "BookMenu", "RaceSex Menu" }) {
+                if (ui->IsMenuOpen(name)) return false;
+            }
+            return !FreeCam::IsActive();
+        }
+
+        void RememberControls() {
+            if (!PlainGameplay()) return;
+            if (const auto* now = EnabledControls()) {
+                constexpr std::uint32_t kMovement = 1u;  // UserEvents::USER_EVENT_FLAG::kMovement
+                if (*now & kMovement) {  // a locked state (a script's cutscene) is not what the player should get back
+                    s_gameplayControls = *now;
+                    s_haveControls     = true;
+                }
+            }
+        }
+
+        // Before the free camera ends: the stored copy it gives back is the gameplay one.
+        void StoreGameplayControls() {
+            if (!s_haveControls) return;
+            if (auto* stored = StoredControls()) {
+                if (*stored != s_gameplayControls) {
+                    SKSE::log::info("ConvoCam: stored controls {:#x} -> {:#x} before the free camera ends", *stored, s_gameplayControls);
+                    *stored = s_gameplayControls;
+                }
+            }
+            s_checkControlsUntil = Now() + 3.0;
+        }
+
+        // After it: anything the player had in plain gameplay and does not have now is given back (never taken away).
+        void CheckControlsAfter() {
+            if (!s_haveControls || Now() > s_checkControlsUntil) return;
+            if (!PlainGameplay()) return;
+            if (auto* now = EnabledControls()) {
+                const std::uint32_t missing = s_gameplayControls & ~*now;
+                if (missing) {
+                    SKSE::log::info("ConvoCam: controls {:#x} were missing after the conversation - given back ({:#x} -> {:#x})", missing, *now,
+                        *now | missing);
+                    *now |= missing;
+                }
+            }
+        }
+
+        // Where the game's own camera would be again: behind the player, looking the way the player faces, at the distance and
+        // pitch it had before - not the pose it had when the conversation began (the player turns to the NPC, and a swing back to
+        // the old direction was the "rolls around, looks at the ground" return).
+        Pose ChasePose() {
+            auto*       player = RE::PlayerCharacter::GetSingleton();
+            const float h      = player->GetAngleZ();
+            const RE::NiPoint3 eye = EyePoint(player);
+            Pose        p;
+            p.yaw  = h;
+            p.roll = 0.0f;
+            p.fov  = s_s.pre.fov > 1.0f ? s_s.pre.fov : GetFOV();
+            if (s_s.firstPerson) {
+                p.pos   = { eye.x, eye.y, eye.z };
+                p.pitch = 0.0f;
+                return p;
+            }
+            float dist = std::hypot(s_s.pre.x, s_s.pre.y);
+            if (!(dist > 40.0f) || !std::isfinite(dist)) dist = 150.0f;
+            dist        = std::clamp(dist, 60.0f, 400.0f);
+            float pitch = s_s.pre.pitch;
+            if (!std::isfinite(pitch) || std::fabs(pitch) > 0.9f) pitch = 0.12f;
+            p.pitch = pitch;
+            p.pos   = { eye.x - std::sin(h) * dist * std::cos(pitch), eye.y - std::cos(h) * dist * std::cos(pitch), eye.z + dist * std::sin(pitch) };
+            return p;
+        }
+
         // ---- shots ----------------------------------------------------------------------------------------------------
         struct Target {
             RE::NiPoint3 pos;
@@ -346,6 +442,7 @@ namespace ConvoCam {
         void FinishReturn() {
             SKSE::log::info("ConvoCam: giving the free camera back");
             if (FreeCam::TFCamDriving()) SceneCam::NoteOwnLeave();
+            StoreGameplayControls();
             SlccBridge::LeaveFreeFly("Conversation camera");
             ResetSession();
         }
@@ -376,6 +473,7 @@ namespace ConvoCam {
             s_s.st            = St::kStarting;
             s_s.startedAt     = Now();
             s_s.speaker       = spk->CreateRefHandle();
+            if (auto* cam = Cam(); cam && cam->currentState) s_s.firstPerson = cam->currentState->id == RE::CameraStates::kFirstPerson;
             s_s.speakerName   = spk->GetDisplayFullName() ? spk->GetDisplayFullName() : "";
             Event(std::format("conversation with {} - camera starting", s_s.speakerName.empty() ? "an NPC" : s_s.speakerName));
             SlccBridge::RequestEnterFreeFly("Conversation camera");
@@ -409,6 +507,8 @@ namespace ConvoCam {
             const bool talking = s_cfg.enabled && DialogueOpen();
             const char* block  = nullptr;
             if (s_s.st == St::kOff) {
+                RememberControls();
+                CheckControlsAfter();
                 if (talking) {
                     block = StartBlock();
                     if (!block) Start();
@@ -472,7 +572,7 @@ namespace ConvoCam {
             }
             s_s.retT += dt;
             const float w = s_s.retDur > 0.0f ? SmoothStep(s_s.retT / s_s.retDur) : 1.0f;
-            WritePose(fcs, LerpPose(s_s.retFrom, FromPre(s_s.pre), w));
+            WritePose(fcs, LerpPose(s_s.retFrom, ChasePose(), w));
             if (auto* player = RE::PlayerCharacter::GetSingleton()) CamCollision::Request(EyePoint(player), "conversation camera, back to the normal camera");
             if (w >= 1.0f) FinishReturn();
         }
