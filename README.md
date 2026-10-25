@@ -38,14 +38,19 @@ furniture, by hand or through Sandbox When Idle, blends the camera there after a
 back. Movement, jump and activate keys also give it back (not TFCam's own roll / reset / freeze / screenshot / slow keys).
 Shots are kept in `SceneShots.tsv` under `furn:<plugin>|<local id>`.
 
-**Walls.** The automatic cameras stop in front of walls: the idle camera (and its blend back), the Scene Camera orbit
+**Walls.** The automatic cameras keep out of walls: the idle camera (and its blend back), the Scene Camera orbit
 and every blend to a saved shot (scene stage, pose, furniture). Each frame TFCam casts rays from the point the camera
-looks at to the camera (one on the camera, one either side of it, level with it). If something solid is in between,
-the camera moves in at once to *Distance kept from a wall* in front of it. When the way is clear again it waits a
-quarter of a second and then eases back out over *Ease back out*. People are passed through. Your own free-fly and the
-eye view are never stopped. A shot that ends behind a wall stays at the safe spot, and you fly on from there. The rays
-use the camera-sphere collision layer (`iLayer=36` in `[Collision]`; 41 = line of sight). Each push is logged in
-`TFCam.log` ("CamCollision: ... pulled in N of M units by <ref> (layer L)").
+looks at to the camera (one on the camera, one either side of it, level with it, as wide apart as the corners of the
+camera's near plane). If a wall is in between, the camera is moved out along the wall's own direction to *Distance kept
+from a wall* in front of it, so a camera that passes a wall slides along it and keeps looking at the same point. It
+eases in over *Ease in to a wall*; when the way is clear again it waits a quarter of a second and then eases back out
+over *Ease back out*. People are passed through, and so are loose clutter and objects smaller than *Ignore objects
+smaller than* (sconces, things on a table). Two tick boxes let the camera pass through *large items* (furniture and
+other big props) and through *walls* (the upright surfaces of buildings; floors and ceilings still stop it). Your own
+free-fly and the eye view are never stopped. A shot that ends behind a wall stays at the safe spot, and you fly on from
+there. The rays use the camera-sphere collision layer (`iLayer=36` in `[Collision]`; 41 = line of sight). Each push is
+logged in `TFCam.log` ("CamCollision: ... moved N units off the wall of <ref> (layer L ...)"), and the first one logs the
+camera's frustum.
 
 Settings: `TFCam.ini` sections `[Idle]`, `[Furniture]` and `[Collision]` (written by the page; an older file uses the
 defaults).
@@ -108,6 +113,17 @@ What it does is logged to `TFCam.log` in SKSE's log folder (`Documents/My Games/
 the scene / stage ids, shots saved / recalled / deleted, refusals, automatic free camera waits and drops).
 
 ## Changelog
+
+**0.15.1** (fork by CageTV)
+- *Walls* rework: the camera slides along a wall instead of being pulled toward the player, so passing a wall no longer
+  dips in and swings back out; it keeps looking at the same point. The pull eases in (`[Collision] fApproachSeconds`, 0.3 s; 0 = at
+  once). The side probes run parallel to the camera line and reach as far as the near plane's corners (from the live near clip, FOV and
+  aspect), and the camera keeps at least the near clip plus 4 units off a wall.
+- Walls ignore loose clutter and objects whose bounding sphere is under `fIgnoreSmallerThan` (50): sconces and things on tables no
+  longer bump the camera. New tick boxes `bPassLargeItems` (bounding sphere up to `fLargeItemRadius`, 200) and `bPassWalls` (upright
+  surfaces of anything bigger; floors and ceilings still count), both off by default. All of them are on the Walls page.
+- Idle camera, dolly zoom: the close end stops at `[Idle] fDollyMinDistance` (90 units, scaled in interiors) and stays at least 0.7 of that
+  to the side of the body, so the near plane and the body's edge are not in view; the wide FOV is capped to keep the framing.
 
 **0.14.1** (fork by CageTV)
 - The download is now an installer (FOMOD) with one `TFCam.dll` per game version: **AE 1.6.x / 1.7.x**, **SE 1.5.97**, and **All versions**
