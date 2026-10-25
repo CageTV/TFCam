@@ -44,6 +44,11 @@ namespace ConvoCam {
     bool OwnsMotion();                                       // the conversation camera moves the camera (menu restore etc. stand down)
     void OnGameLoad(const char* a_why);
 
+    // The Activate button went down (ActivateHandler::ProcessButton, main thread, before the game acts on it). When what the
+    // crosshair is on is an NPC to talk to, the free camera begins here - before the dialogue can open. True = armed: let the
+    // press through even though free cam normally eats Activate.
+    bool OnActivatePress(RE::ButtonEvent* a_event);
+
     struct MenuStatus {
         char state[96]      = {};
         char shot[48]       = {};

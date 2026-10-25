@@ -632,7 +632,15 @@ namespace ConvoCam {
             s_s.look  = { cur.pos.x + fwd.x * sep, cur.pos.y + fwd.y * sep, cur.pos.z + fwd.z * sep };
             s_s.vAng = s_s.vRad = s_s.vZ = s_s.vFov = 0.0f;
             s_s.vLook                                  = {};
-            s_s.shot                                   = Shot::kOverPlayer;
+            {
+                // The first shot is the one that needs the shorter swing round the pair (an NPC behind the player would
+                // otherwise send the camera right round the player).
+                auto swing = [&](Shot sh) {
+                    const Target t = ShotTarget(sh);
+                    return std::fabs(WrapPi(std::atan2(t.pos.x - m.x, t.pos.y - m.y) - s_s.ang));
+                };
+                s_s.shot = swing(Shot::kReverse) + 0.35f < swing(Shot::kOverPlayer) ? Shot::kReverse : Shot::kOverPlayer;
+            }
             s_s.shotSince                              = Now();
             s_s.settle                                 = s_cfg.blendIn;
             s_s.clock                                  = 0.0f;
@@ -775,6 +783,21 @@ namespace ConvoCam {
     }
 
     bool OwnsMotion() { return s_s.st == St::kRunning || s_s.st == St::kReturning || s_s.st == St::kStarting; }
+
+    bool OnActivatePress(RE::ButtonEvent* a_event) {
+        if (!a_event || !s_cfg.enabled || s_s.st != St::kOff || !a_event->IsDown()) return false;
+        auto* pick = RE::CrosshairPickData::GetSingleton();
+        if (!pick) return false;
+        auto ref = pick->GetActiveTarget().get();
+        auto* a  = ref ? ref->As<RE::Actor>() : nullptr;
+        if (!a) return false;
+        if (const char* block = ArmBlock(a)) {
+            SKSE::log::info("ConvoCam: activate pressed on {} - not armed: {}", a->GetDisplayFullName() ? a->GetDisplayFullName() : "an actor", block);
+            return false;
+        }
+        Arm(a);
+        return s_s.st == St::kStarting;
+    }
 
     void OnGameLoad(const char* a_why) {
         if (s_s.st != St::kOff) Event(std::format("{} - session dropped", a_why));
