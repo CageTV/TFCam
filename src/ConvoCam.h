@@ -32,6 +32,7 @@ namespace ConvoCam {
         int   reverseKind    = 0;       // 0 = over the NPC's shoulder, 1 = wide two-shot from the side
         bool  swapSide       = false;   // the other shoulder
         float drift          = 1.0f;    // slow handheld sway, 0 = still; 0..3
+        bool  noEdgePan      = false;   // the game's mouse edge-pan in dialogue (fPCDialogueLookSpeed) off in every dialogue; always off while the camera films
     };
 
     Settings& Get();

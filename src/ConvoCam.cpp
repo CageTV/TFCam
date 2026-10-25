@@ -570,10 +570,35 @@ namespace ConvoCam {
             if (++s_watch.stage > 3) s_watch.stage = 0;
         }
 
+        // The game pans the camera when the mouse is pushed to the screen edge in a dialogue (fPCDialogueLookSpeed). It fights the
+        // conversation camera, so the setting is held at 0 while the camera films (and always, when noEdgePan is ticked).
+        void ApplyEdgePan() {
+            static RE::Setting* s_set = nullptr;
+            static float        s_orig = 0.0f;
+            static bool         s_off  = false;
+            if (!s_set) {
+                auto* ini = RE::INISettingCollection::GetSingleton();
+                s_set     = ini ? ini->GetSetting("fPCDialogueLookSpeed:Controls") : nullptr;
+                if (!s_set) return;
+            }
+            const bool want = s_cfg.noEdgePan || (s_cfg.enabled && s_s.st != St::kOff);
+            if (want && !s_off) {
+                s_orig       = s_set->data.f;
+                s_set->data.f = 0.0f;
+                s_off        = true;
+                SKSE::log::info("ConvoCam: mouse edge-pan in dialogue off (fPCDialogueLookSpeed {:.2f} -> 0)", s_orig);
+            } else if (!want && s_off) {
+                s_set->data.f = s_orig;
+                s_off         = false;
+                SKSE::log::info("ConvoCam: mouse edge-pan in dialogue back (fPCDialogueLookSpeed {:.2f})", s_orig);
+            }
+        }
+
         void Tick() {
             s_tickQueued = false;
             auto* player = RE::PlayerCharacter::GetSingleton();
             const double now = Now();
+            ApplyEdgePan();
             if (!player || !player->Is3DLoaded()) {
                 if (s_s.st != St::kOff) ResetSession();
                 return;

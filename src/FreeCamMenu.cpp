@@ -276,6 +276,7 @@ namespace FreeCamMenu {
         WriteINIInt("Conversation", "iReverseKind", c.reverseKind);
         WriteINIInt("Conversation", "bSwapSide", c.swapSide ? 1 : 0);
         WriteINIFloat("Conversation", "fDrift", c.drift);
+        WriteINIInt("Conversation", "bNoEdgePan", c.noEdgePan ? 1 : 0);
     }
 
     // 0.12.0 walls for the automatic cameras, TFCam.ini [Collision].
@@ -1003,6 +1004,7 @@ namespace FreeCamMenu {
                 cvChanged      = true;
             }
             cvChanged |= ImGuiMCP::Checkbox("Other shoulder##cvSide", &cv.swapSide);
+            cvChanged |= ImGuiMCP::Checkbox("No mouse edge-pan in any dialogue (the camera turns it off while it films)##cvEdge", &cv.noEdgePan);
             ImGuiMCP::SetNextItemWidth(200.0f);
             cvChanged |= ImGuiMCP::SliderFloat("Settle on the first shot (s)##cvIn", &cv.blendIn, 0.3f, 6.0f, "%.1f");
             ImGuiMCP::SetNextItemWidth(200.0f);
@@ -1279,6 +1281,7 @@ namespace FreeCamMenu {
             c.reverseKind     = readInt("Conversation", "iReverseKind", d.reverseKind);
             c.swapSide        = readInt("Conversation", "bSwapSide", d.swapSide ? 1 : 0) != 0;
             c.drift           = readFloat("Conversation", "fDrift", d.drift);
+            c.noEdgePan       = readInt("Conversation", "bNoEdgePan", d.noEdgePan ? 1 : 0) != 0;
             ConvoCam::Clamp();
             SKSE::log::info("ConvoCam: conversation camera {} - {} shot, settle {:.1f} s, shot change {:.1f} s",
                 c.enabled ? "on" : "off", c.reverseKind == 1 ? "two-shot reverse" : "over-the-shoulder reverse", c.blendIn, c.shotSwitch);
