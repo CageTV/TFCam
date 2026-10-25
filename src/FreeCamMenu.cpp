@@ -261,6 +261,7 @@ namespace FreeCamMenu {
         WriteINIFloat("Collision", "fMargin", c.margin);
         WriteINIFloat("Collision", "fReturnSeconds", c.returnSec);
         WriteINIFloat("Collision", "fApproachSeconds", c.approachSec);
+        WriteINIFloat("Collision", "fIgnoreSmallerThan", c.ignoreSmall);
         WriteINIInt("Collision", "iLayer", c.layer);
     }
 
@@ -880,6 +881,9 @@ namespace FreeCamMenu {
             wChanged |= ImGuiMCP::SliderFloat("Ease back out (s)##cwRet", &c.returnSec, 0.1f, 3.0f, "%.1f");
             ImGuiMCP::SetNextItemWidth(200.0f);
             wChanged |= ImGuiMCP::SliderFloat("Ease in to a wall (s)##cwApp", &c.approachSec, 0.0f, 2.0f, "%.2f");
+            ImGuiMCP::SetNextItemWidth(200.0f);
+            wChanged |= ImGuiMCP::SliderFloat("Ignore objects smaller than##cwSmall", &c.ignoreSmall, 0.0f, 200.0f, "%.0f");
+            ImGuiMCP::TextColored(grey, "Sconces, books and things on a table are not walls. 0 = everything counts.");
             ImGuiMCP::TextColored(grey, "Walls: %s", CamCollision::MenuStatus().c_str());
             if (wChanged) {
                 CamCollision::Clamp();
@@ -1183,6 +1187,7 @@ namespace FreeCamMenu {
             c.margin    = readFloat("Collision", "fMargin", d.margin);
             c.returnSec = readFloat("Collision", "fReturnSeconds", d.returnSec);
             c.approachSec = readFloat("Collision", "fApproachSeconds", d.approachSec);
+            c.ignoreSmall = readFloat("Collision", "fIgnoreSmallerThan", d.ignoreSmall);
             c.layer     = readInt("Collision", "iLayer", d.layer);
             CamCollision::Clamp();
             SKSE::log::info("CamCollision: walls {} for the automatic cameras - margin {:.0f}, ease in {:.2f} s, ease out {:.1f} s, ray layer {}",

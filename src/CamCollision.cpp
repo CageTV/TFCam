@@ -91,6 +91,18 @@ namespace CamCollision {
             return a_near * std::tan(fov * 0.5f * 0.01745329f) * aspect;
         }
 
+        // 0.15.3: a sconce on the wall or an item on a table is not a wall: the camera went over every one of them. Loose clutter and
+        // debris never count; neither does any object whose bounding sphere is smaller than ignoreSmall (terrain and anything
+        // without a 3D bound still counts).
+        bool IsSmallProp(RE::COL_LAYER a_layer, RE::TESObjectREFR* a_ref) {
+            if (a_layer == RE::COL_LAYER::kClutter || a_layer == RE::COL_LAYER::kDebrisSmall || a_layer == RE::COL_LAYER::kDebrisLarge) return true;
+            if (!(s_cfg.ignoreSmall > 0.0f) || !a_ref) return false;
+            auto* root = a_ref->Get3D();
+            if (!root) return false;
+            const float radius = root->worldBound.radius;
+            return std::isfinite(radius) && radius > 0.1f && radius < s_cfg.ignoreSmall;
+        }
+
         bool IsCharacterLayer(RE::COL_LAYER a_layer) {
             switch (a_layer) {
             case RE::COL_LAYER::kBiped:
@@ -131,7 +143,7 @@ namespace CamCollision {
                 const auto* coll  = pick.rayOutput.rootCollidable;
                 const auto  layer = coll ? coll->GetCollisionLayer() : RE::COL_LAYER::kUnidentified;
                 auto*       ref   = coll ? RE::TESHavokUtilities::FindCollidableRef(*coll) : nullptr;
-                if (IsCharacterLayer(layer) || (ref && ref->IsActor()) || frac * len < kSkipNear) {
+                if (IsCharacterLayer(layer) || (ref && ref->IsActor()) || IsSmallProp(layer, ref) || frac * len < kSkipNear) {
                     start = frac + 1.0f / len;  // step 1 unit past it and look again
                     continue;
                 }
@@ -226,6 +238,7 @@ namespace CamCollision {
         range(s_cfg.margin, 4.0f, 60.0f, 16.0f);
         range(s_cfg.returnSec, 0.1f, 3.0f, 0.8f);
         range(s_cfg.approachSec, 0.0f, 2.0f, 0.3f);
+        range(s_cfg.ignoreSmall, 0.0f, 200.0f, 50.0f);
         if (s_cfg.layer < 1 || s_cfg.layer > 46) s_cfg.layer = 36;
     }
 
