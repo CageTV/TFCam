@@ -642,6 +642,10 @@ namespace ConvoCam {
                 s_s.shot = swing(Shot::kReverse) + 0.35f < swing(Shot::kOverPlayer) ? Shot::kReverse : Shot::kOverPlayer;
             }
             s_s.shotSince                              = Now();
+            SKSE::log::info("ConvoCam: seed - camera ({:.0f}, {:.0f}, {:.0f}) yaw {:.2f} pitch {:.2f} fov {:.0f}; player ({:.0f}, {:.0f}, {:.0f}); NPC ({:.0f}, {:.0f}, {:.0f}); "
+                            "midpoint angle {:.2f} radius {:.0f}; first shot {}",
+                cur.pos.x, cur.pos.y, cur.pos.z, cur.yaw, cur.pitch, cur.fov, s_s.player.x, s_s.player.y, s_s.player.z, s_s.npc.x, s_s.npc.y,
+                s_s.npc.z, s_s.ang, s_s.rad, s_s.shot == Shot::kReverse ? "reverse" : "over the player");
             s_s.settle                                 = s_cfg.blendIn;
             s_s.clock                                  = 0.0f;
         }
@@ -709,6 +713,13 @@ namespace ConvoCam {
             s_s.look.y = SmoothDamp(s_s.look.y, t.look.y, s_s.vLook.y, settle, 300.0f, dt);
             s_s.look.z = SmoothDamp(s_s.look.z, t.look.z, s_s.vLook.z, settle, 300.0f, dt);
 
+            static double s_nextTrace = 0.0;
+            if (s_s.clock < 0.05f) s_nextTrace = 0.0;
+            if (s_s.clock < 7.0f && now >= s_nextTrace) {
+                s_nextTrace = now + 0.5;
+                SKSE::log::info("ConvoCam: trace t={:.1f} - angle {:.2f} -> {:.2f}, radius {:.0f} -> {:.0f}, height {:.0f} -> {:.0f}, look ({:.0f}, {:.0f}, {:.0f}) -> ({:.0f}, {:.0f}, {:.0f}), shot {}",
+                    s_s.clock, s_s.ang, tAng, s_s.rad, tRad, s_s.z, t.pos.z, s_s.look.x, s_s.look.y, s_s.look.z, t.look.x, t.look.y, t.look.z, ShotName(s_s.shot));
+            }
             Pose p;
             p.pos = { m.x + std::sin(s_s.ang) * s_s.rad, m.y + std::cos(s_s.ang) * s_s.rad, s_s.z };
             // A slow handheld sway on the point it looks at.
