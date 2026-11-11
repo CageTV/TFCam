@@ -28,7 +28,10 @@
 #include <mutex>
 #include <string>
 #include <string_view>
+#include <chrono>
+#include <thread>
 #include <Windows.h>
+#include <intrin.h>
 
 namespace FreeCam {
 
@@ -874,11 +877,118 @@ namespace FreeCam {
         static inline REL::Relocation<decltype(thunk)> func;
     };
 
+    // 0.18.1 diagnostic: the call chain above stops where the caller has no unwind data (a stub in private memory), so
+    // 2026-11-10's "stuck in the free camera after the pet sat down" could not be traced to a mod. This scans the raw
+    // stack above the hook for return addresses (a call instruction right before them) inside loaded modules and lists
+    // each distinct module+offset once: the mod that asked for the free camera is among them. Never per frame.
+    __declspec(noinline) static std::string StackScan() {
+        auto*       sp    = static_cast<std::uintptr_t*>(_AddressOfReturnAddress());
+        auto*       tib   = reinterpret_cast<NT_TIB*>(::NtCurrentTeb());
+        auto* const limit = static_cast<std::uintptr_t*>(tib->StackBase);
+        std::string out;
+        std::string seen;
+        int         shown = 0;
+        for (unsigned i = 0; sp + i < limit && i < 1024 && shown < 18; ++i) {
+            const std::uintptr_t v = sp[i];
+            if (v < 0x10000) continue;
+            HMODULE mod = nullptr;
+            if (!::GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                    reinterpret_cast<LPCWSTR>(v), &mod) || !mod) continue;
+            MEMORY_BASIC_INFORMATION mbi{};
+            if (!::VirtualQuery(reinterpret_cast<void*>(v - 8), &mbi, sizeof(mbi)) || mbi.State != MEM_COMMIT) continue;
+            if (!(mbi.Protect & (PAGE_EXECUTE | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY))) continue;
+            if (reinterpret_cast<std::uintptr_t>(mbi.BaseAddress) + mbi.RegionSize < v) continue;
+            const auto* p = reinterpret_cast<const unsigned char*>(v);
+            const bool  isCall = p[-5] == 0xE8 || (p[-2] == 0xFF && (p[-1] & 0x38) == 0x10) || (p[-3] == 0xFF && (p[-2] & 0x38) == 0x10) ||
+                                 (p[-6] == 0xFF && (p[-5] & 0x38) == 0x10) || (p[-7] == 0xFF && (p[-6] & 0x38) == 0x10);
+            if (!isCall) continue;
+            wchar_t           path[MAX_PATH] = {};
+            const DWORD       len            = ::GetModuleFileNameW(mod, path, MAX_PATH);
+            std::wstring_view full(path, len);
+            const auto        slash = full.find_last_of(L"\\/");
+            const auto        base  = slash == std::wstring_view::npos ? full : full.substr(slash + 1);
+            std::string       entry;
+            for (const wchar_t c : base) entry.push_back(c < 0x80 ? static_cast<char>(c) : '?');
+            entry += std::format("+0x{:X}", v - reinterpret_cast<std::uintptr_t>(mod));
+            if (seen.find(entry + ";") != std::string::npos) continue;
+            seen += entry + ";";
+            if (!out.empty()) out += " < ";
+            out += entry;
+            ++shown;
+        }
+        return out.empty() ? std::string("(none found)") : out;
+    }
+
+    // 0.18.1 diagnostic: what the game looked like when the free camera was switched on (read before the state changes).
+    static std::string EntryContext() {
+        std::string s;
+        if (auto* cam = RE::PlayerCamera::GetSingleton()) {
+            s += std::format("camera before: state {} first={} third={}", cam->currentState ? static_cast<int>(cam->currentState->id) : -1,
+                cam->IsInFirstPerson(), cam->IsInThirdPerson());
+        }
+        if (auto* pc = RE::PlayerCharacter::GetSingleton()) {
+            s += std::format("; player sit/sleep state {}", static_cast<int>(pc->AsActorState()->GetSitSleepState()));
+            if (auto furn = pc->GetOccupiedFurniture(); furn && furn.get()) {
+                s += std::format("; on furniture {:08X}", furn.get()->GetFormID());
+            }
+        }
+        std::string menus;
+        if (auto* ui = RE::UI::GetSingleton()) {
+            for (const char* m : { "Dialogue Menu", "ContainerMenu", "BarterMenu", "Journal Menu", "TweenMenu", "MessageBoxMenu", "Console",
+                                   "Training Menu", "Sleep/Wait Menu", "InventoryMenu", "MapMenu", "LevelUp Menu", "Lockpicking Menu", "Book Menu" }) {
+                if (ui->IsMenuOpen(m)) menus += std::string(menus.empty() ? "" : ",") + m;
+            }
+        }
+        s += std::format("; menus open: {}; dialogue: {}", menus.empty() ? "none" : menus, InDialogue());
+        s += std::format("; last key: {}", DescribeLastPress());
+        return s;
+    }
+
+    // 0.18.1: a free camera nobody asked for. 2026-11-10: choosing "train" on an Instincts pet put the player on a furniture
+    // marker; when the player stood up the game switched to the free camera on a worker thread (no TFCam call, no TFCam key,
+    // no console, no FCFW / SLCC timeline) and the player had no control until the Wait menu was opened. TFCam adopted that
+    // free camera as its own session (HUD hidden, E eaten, camera inertia). Now such an entry is detected and TFCam gives it
+    // back after a short grace: [Camera] bExitUnrequestedFreeCam=1 (default), iUnrequestedFreeCamGraceMs=3000 in TFCam.ini.
+    // "Asked for" = TFCam's own toggle, TFCam code on the stack (the conversation / furniture / idle / path cameras), a key
+    // press in the last 0.6 s, the console open, or an FCFW / SLCC timeline. Anything else is unrequested. A wrong guess here
+    // errs on the safe side: a TFCam stack frame left over on the stack only keeps the free camera on.
+    static std::atomic<std::uint32_t> s_unrequestedSerial{ 0 };
+
+    static const char* IniPathForUnrequested() {
+        static char path[MAX_PATH] = {};
+        if (!path[0]) ::GetFullPathNameA("Data\\SKSE\\Plugins\\TFCam.ini", MAX_PATH, path, nullptr);
+        return path;
+    }
+
+    static void ScheduleUnrequestedExit(const std::string& a_ctx) {
+        if (::GetPrivateProfileIntA("Camera", "bExitUnrequestedFreeCam", 1, IniPathForUnrequested()) == 0) {
+            SKSE::log::info("FreeCam: this free camera was not asked for by TFCam, its keys, the console or a timeline; "
+                            "bExitUnrequestedFreeCam=0, so it stays on");
+            return;
+        }
+        const int graceMs = (std::max)(500, static_cast<int>(::GetPrivateProfileIntA("Camera", "iUnrequestedFreeCamGraceMs", 3000, IniPathForUnrequested())));
+        const std::uint32_t serial = ++s_unrequestedSerial;
+        SKSE::log::info("FreeCam: this free camera was not asked for by TFCam, its keys, the console or a timeline (probably another mod or "
+                        "the game); TFCam gives it back in {} ms unless it ends first. {}", graceMs, a_ctx);
+        std::thread([serial, graceMs]() {
+            std::this_thread::sleep_for(std::chrono::milliseconds(graceMs));
+            SKSE::GetTaskInterface()->AddTask([serial]() {
+                if (s_unrequestedSerial.load() != serial) return;  // it ended, or a newer free camera began
+                auto* cam = RE::PlayerCamera::GetSingleton();
+                if (!cam || !cam->IsInFreeCameraMode()) return;
+                SKSE::log::info("FreeCam: leaving the free camera nobody asked TFCam for (safety exit)");
+                SlccBridge::LeaveFreeFly("free camera nobody asked for");  // never touches an FCFW / SLCC timeline's camera
+            });
+        }).detach();
+    }
+
     // --- FreeCameraState::Begin hook ---
 
     struct FreeCamBeginHook {
         static void thunk(RE::TESCameraState* a_this) {
             const std::string chain = CallerChain(24);  // 0.7.9 diagnostic: who turned free cam on
+            const std::string scan  = StackScan();      // 0.18.1: the same, by scanning the raw stack (the chain stops at stubs)
+            const std::string ctx   = EntryContext();   // 0.18.1: the game's state at that moment
             func(a_this);
 
             // 0.7.10: cheap bookkeeping stays on the calling thread (it may be a Papyrus VM thread).
@@ -902,6 +1012,21 @@ namespace FreeCam {
                 s_entryPosePending = false;
             }
             const bool selfToggle = SlccBridge::IsSelfToggle();  // read now: a queued callback runs after the toggle
+
+            // 0.18.1: was this free camera asked for? (see ScheduleUnrequestedExit)
+            if (driven) {
+                int tfcamFrames = 0;
+                for (std::size_t at = 0; (at = scan.find("TFCam.dll+", at)) != std::string::npos; at += 10) ++tfcamFrames;
+                const bool byTfcam = selfToggle || tfcamFrames >= 2;  // frame 1 is TFCam's own hook
+                double     lastKeyMs = -1.0;
+                {
+                    std::lock_guard lock(s_lastPressLock);
+                    if (s_lastPress.qpc != 0) lastKeyMs = MsSince(s_lastPress.qpc);
+                }
+                auto*      ui        = RE::UI::GetSingleton();
+                const bool byUser    = (ui && ui->IsMenuOpen("Console")) || (lastKeyMs >= 0.0 && lastKeyMs < 600.0);
+                if (!byTfcam && !byUser) ScheduleUnrequestedExit(ctx);
+            }
 
             NoteOffMainThread("Begin", s_beginOffMainLogged);
             const std::string thread = ThreadTag();
@@ -928,6 +1053,8 @@ namespace FreeCam {
             });
             SKSE::log::info("FreeCam enter: called from {}{}", chain,
                 ranInline ? "" : " (engine work queued to the main thread)");
+            SKSE::log::info("FreeCam enter: stack scan (modules that called, nearest first): {}", scan);
+            SKSE::log::info("FreeCam enter: {}", ctx);
         }
         static inline REL::Relocation<decltype(thunk)> func;
     };
@@ -939,6 +1066,7 @@ namespace FreeCam {
             // 0.7.9 diagnostic (permanent, cheap): the caller chain names the DLL that ended free cam, and the last
             // key TFCam's input sink saw names the key behind it. 2026-09-26: exits with no TFCam cause ran on Papyrus
             // VM threads - Poser Hotkeys Plus' Jump handler running ConsoleUtil.ExecuteCommand("tfc").
+            ++s_unrequestedSerial;  // 0.18.1: the free camera ended: a pending safety exit is moot
             const std::string chain = CallerChain(24);
             const bool        scriptSession = s_scriptTfcSession.exchange(false);
 

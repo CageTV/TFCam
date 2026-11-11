@@ -183,6 +183,15 @@ the scene / stage ids, shots saved / recalled / deleted, refusals, automatic fre
 
 ## Changelog
 
+**0.18.1**
+- *Free camera nobody asked for*: when the game or another mod switches the vanilla free camera on and it is not TFCam's own toggle,
+  its free-fly key, the console or a FreeCamera Framework / SLCC timeline, TFCam now logs it and gives the camera back after a
+  short grace. Seen with Instincts' pet training: the free camera came on when the player stood up from the training seat and
+  held the player until the Wait menu was opened. `TFCam.ini` `[Camera]` `bExitUnrequestedFreeCam=1` (default) and
+  `iUnrequestedFreeCamGraceMs=3000`; set `bExitUnrequestedFreeCam=0` to switch it off. Not in the settings menu.
+- `TFCam.log`: every free-camera entry now also lists the modules found on the call stack (the old call chain stops at stubs
+  without unwind data) and the game state at that moment (camera state, sit state and furniture, open menus, dialogue, last key).
+
 **0.18.0**
 - *Action FOV* (`[ActionFOV]`, off by default): the view reacts to bow draws and releases, power attacks, big spells,
   shouts and speed.
