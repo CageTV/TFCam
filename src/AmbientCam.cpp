@@ -907,6 +907,11 @@ namespace AmbientCam {
             s_status = st;
         }
 
+        bool SitTransition(RE::PlayerCharacter* a_player) {
+            const auto ss = static_cast<std::uint32_t>(a_player->AsActorState()->GetSitSleepState());
+            return ss != 0 && ss != 3 && ss != 7;  // 0 normal, 3 sitting / riding, 7 sleeping: anything else is on the way
+        }
+
         void Tick() {
             s_tickQueued = false;
             auto* player = RE::PlayerCharacter::GetSingleton();
@@ -946,6 +951,11 @@ namespace AmbientCam {
             // Idle camera start.
             const char* block = BlockReason(s_sess.owned);
             if (!s_sess.owned) {
+                // 0.18.2: not while the player is in the middle of sitting down, getting up or lying down / waking. 2026-11-10: Instincts' pet
+                // training seat never finished seating the player (sit state 2, "waiting for the sit animation"); after 25 s TFCam's idle camera
+                // started its dolly zoom over that, which looked like a shifting, inertia-heavy first-person view the player could not leave.
+                // Seated (3, also riding) and asleep (7) are unchanged. The idle clock restarts when the state settles.
+                if (!block && SitTransition(player)) block = "sitting down or getting up";
                 if (block) s_lastActivity = now;
                 const bool test = s_testRequested.load();
                 if (test && !block && !FreeCamMenu::IsOverlayOpen()) {
