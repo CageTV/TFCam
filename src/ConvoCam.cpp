@@ -88,6 +88,9 @@ namespace ConvoCam {
             return static_cast<double>(t.QuadPart) / freq;
         }
 
+        float g_realDt = 0.0f;  // the last frame's real time, paused or not (a trade menu's shot runs on it)
+        bool  g_turnPending = false;  // a change of shot is under way: its time goes in the log when it lands
+
         // Own frame time for the drive: capped at 0.1 s, 0 while the game is paused.
         float FrameDt() {
             static double s_last = 0.0;
@@ -95,6 +98,7 @@ namespace ConvoCam {
             float         dt     = s_last > 0.0 ? static_cast<float>(now - s_last) : 0.0f;
             s_last               = now;
             dt                   = std::clamp(dt, 0.0f, 0.1f);
+            g_realDt             = dt;
             auto* ui             = RE::UI::GetSingleton();
             if (ui && ui->GameIsPaused()) dt = 0.0f;
             return dt;
@@ -129,7 +133,7 @@ namespace ConvoCam {
         Pose ReadPose(const RE::FreeCameraState* fcs) {
             Pose p;
             p.pos   = fcs->translation;
-            p.pitch = fcs->rotation.x;
+            p.pitch = WrapPi(fcs->rotation.x);  // 0.17.1 (Claude): the vanilla free camera keeps its pitch in 0..2 pi
             p.yaw   = fcs->rotation.y;
             p.roll  = FreeCam::GetRollRadians();
             p.fov   = GetFOV();
@@ -213,6 +217,18 @@ namespace ConvoCam {
             RE::NiPoint3 vLook{};
             Shot         shot      = Shot::kOverPlayer;
             double       shotSince = 0.0;
+            bool         tradeHold = false;  // a menu opened from the talk (barter, gift ...) holds the camera on one shot
+            // --Claude 11-22: a picked line - the camera stays on the player until the NPC's voice starts
+            const RE::TESTopicInfo* lastInfo     = nullptr;
+            double                  pickAt       = 0.0;
+            bool                    npcVoiceSeen = true;
+            double                  nextVoiceLog = 0.0;
+            // --Claude 11-22: turning the player to face the NPC
+            bool turning    = false;
+            bool turnLogged = false;
+            int  turnBacks  = 0;
+            float        tradePush = 0.0f;   // how far the trade shot was moved out to keep the player's head off the NPC
+            bool         tradeBlocked = false;  // 11-22: a wall in the way of the shoulder trade shot - face to face for this menu
             float        settle    = 1.6f;  // seconds the damping takes to arrive (the entry is slower than a shot change)
             float        clock     = 0.0f;
             // return
@@ -246,13 +262,56 @@ namespace ConvoCam {
             return state ? static_cast<RE::FreeCameraState*>(state) : nullptr;
         }
 
-        void ResetSession() { s_s = Session{}; }
+        // --Claude 11-22: the player's head (FaceGen node: head, hair, eyes) hidden while a face to face camera is in or behind it
+        // (Distance moved out) - the same cull as the scene camera's eye view. Re-checked every frame (a 3D reload makes a new node).
+        RE::NiPointer<RE::NiAVObject> s_headCulled;
+        bool                          s_headCulledPrev = false;
+
+        void ShowPlayerHead(const char* a_why) {
+            if (!s_headCulled) return;
+            s_headCulled->SetAppCulled(s_headCulledPrev);
+            SKSE::log::info("ConvoCam: your head shown again ({})", a_why);
+            s_headCulled.reset();
+        }
+
+        void HidePlayerHead() {
+            auto* player = RE::PlayerCharacter::GetSingleton();
+            RE::NiAVObject* node = player ? player->GetFaceNodeSkinned() : nullptr;
+            if (!node) return;
+            if (s_headCulled.get() == node) {
+                if (!node->GetAppCulled()) node->SetAppCulled(true);
+                return;
+            }
+            ShowPlayerHead("a new head node");
+            s_headCulled     = RE::NiPointer<RE::NiAVObject>(node);
+            s_headCulledPrev = node->GetAppCulled();
+            node->SetAppCulled(true);
+            SKSE::log::info("ConvoCam: your head hidden - the face to face camera is in or behind it");
+        }
+
+        void ResetSession() {
+            ShowPlayerHead("the conversation camera ended");
+            s_s = Session{};
+        }
+
+        // The dialogue menu hold (defined above FrameCheck): a Dialogue Menu asked to open waits until the free camera is in.
+        void   ReleaseHeld(const std::string& a_why);
+        double HeldFor();  // seconds the held menu has waited; -1 = nothing held
 
         // ---- the conversation ---------------------------------------------------------------------------------------
         bool DialogueOpen() {
             auto* mtm = RE::MenuTopicManager::GetSingleton();
             auto* ui  = RE::UI::GetSingleton();
             return mtm && ui && mtm->menuOpen && ui->IsMenuOpen("Dialogue Menu");
+        }
+
+        // A menu the talk opened on top of itself: trading, a gift, the NPC's things, training.
+        bool TradeMenuOpen() {
+            auto* ui = RE::UI::GetSingleton();
+            if (!ui) return false;
+            for (const char* name : { "BarterMenu", "GiftMenu", "ContainerMenu", "Training Menu" })
+                if (ui->IsMenuOpen(name)) return true;
+            return false;
         }
 
         // The NPC is saying a line (the dialogue manager holds a current topic info only then).
@@ -268,6 +327,19 @@ namespace ConvoCam {
             auto spk = mtm->speaker.get();
             auto ours = s_s.speaker.get();
             return spk && ours && spk.get() == ours.get();
+        }
+
+        // --Claude 11-22: the actor's voice is playing - its high process voice sound handles. The current topic info is set from
+        // the moment a line is picked, while a player-voice mod (DBReV) is still saying the player's own line and holds the reply.
+        bool VoicePlaying(RE::Actor* a) {
+            if (!a) return false;
+            auto* proc = a->GetActorRuntimeData().currentProcess;
+            auto* high = proc ? proc->high : nullptr;
+            if (!high) return false;
+            for (auto& h : high->soundHandles) {
+                if (h.IsValid() && h.IsPlaying()) return true;
+            }
+            return false;
         }
 
         RE::Actor* SpeakerActor() {
@@ -421,7 +493,114 @@ namespace ConvoCam {
             return t;
         }
 
+        // --Claude 11-22: from the player's eyes to the NPC. The camera stands a little in front of the player's face on the line
+        // to the NPC (the player is turned to face them, faceSpeaker), so their own head is behind it, and looks at the NPC's face
+        // and chest: the NPC stands in the open middle of a trade page, where the side shots hid them behind its panels.
+        // 11-22: the eye points are the head BONES, which sit at the jaw, and the lens was
+        // the over-the-shoulder one. The frame now runs from above the NPC's head to the hips (centre kFaceCentre from the head
+        // bone, half height kFaceHalf), the camera at eye height, and the lens is worked out for the real distance (FitFov).
+        constexpr float kFaceCentre = -13.0f;
+        constexpr float kFaceHalf   = 60.0f;   // head to hips: an FOV of about 95 at ~100 units from the face shows about this much
+
+        // the screen's width / height from the live world camera's frustum (16:9 if it cannot be read)
+        float ScreenAspect() {
+            if (!REL::Module::IsVR()) {
+                if (auto* nc = RE::Main::WorldRootCamera()) {
+                    const auto& fr = nc->GetRuntimeData2().viewFrustum;
+                    const float w = fr.fRight - fr.fLeft, h = fr.fTop - fr.fBottom;
+                    if (std::isfinite(w) && std::isfinite(h) && w > 0.0f && h > 0.0f) return std::clamp(w / h, 1.0f, 3.0f);
+                }
+            }
+            return 16.0f / 9.0f;
+        }
+
+        // the game's (horizontal) FOV that shows a_half units above and below the look point from where the camera is
+        float FitFov(const Target& t, float a_half) {
+            const float dx = t.look.x - t.pos.x, dy = t.look.y - t.pos.y, dz = t.look.z - t.pos.z;
+            const float dist = (std::max)(std::sqrt(dx * dx + dy * dy + dz * dz), 20.0f);
+            const float tanH = a_half / dist * ScreenAspect();
+            return std::clamp(2.0f * std::atan(tanH) * 57.2958f, 40.0f, 100.0f);
+        }
+
+        Target FaceToFace(const RE::NiPoint3& P, const RE::NiPoint3& N) {
+            constexpr float kFwd = 22.0f;
+            const float     d    = (std::max)(Len2(N.x - P.x, N.y - P.y), 30.0f);
+            const float     fx = (N.x - P.x) / d, fy = (N.y - P.y) / d;
+            const float     fwd = (std::min)(kFwd, d * 0.35f);
+            Target          t;
+            t.pos  = { P.x + fx * fwd, P.y + fy * fwd, P.z + 6.0f };
+            t.look = { N.x, N.y, N.z + kFaceCentre };
+            t.fov  = FitFov(t, kFaceHalf);
+            return t;
+        }
+
+        // --Claude 11-21: the shot under a menu the talk opened (barter, gift, training), from the Trade menus settings.
+        Target TradeTarget() {
+            const float side = s_cfg.swapSide ? -1.0f : 1.0f;
+            Target      t    = (s_cfg.tradeShot == 3 || s_s.tradeBlocked) ? FaceToFace(s_s.player, s_s.npc) :
+                               s_cfg.tradeShot == 1 ? TwoShot(s_s.player, s_s.npc, side) : OverShoulder(s_s.player, s_s.npc, side);
+            if (s_cfg.tradeShot == 2) {  // closer on the NPC: the camera 40 % of the way to what it looks at, a longer lens
+                t.pos = Mix(t.pos, t.look, 0.4f);
+                t.fov = (std::max)(20.0f, t.fov - 8.0f);
+            }
+            const RE::NiPoint3 back{ t.pos.x - t.look.x, t.pos.y - t.look.y, t.pos.z - t.look.z };
+            t.pos = { t.look.x + back.x * s_cfg.tradeDistance, t.look.y + back.y * s_cfg.tradeDistance, t.look.z + back.z * s_cfg.tradeDistance };
+            if (s_cfg.tradeTurn != 0.0f) {  // round the midpoint of the two
+                const auto  m = Mix(s_s.player, s_s.npc, 0.5f);
+                const float a = s_cfg.tradeTurn * 0.01745329f, c = std::cos(a), s = std::sin(a);
+                const float x = t.pos.x - m.x, y = t.pos.y - m.y;
+                t.pos.x = m.x + x * c - y * s;
+                t.pos.y = m.y + x * s + y * c;
+            }
+            // 11-22: over your shoulder, the default shoulder offset runs the line to the NPC only ~17 units past the middle of
+            // your head when the two stand ~100 apart, so your head covers them. Under the trade menu the camera goes out to the
+            // side (pivoting on the NPC) until that line clears your head by kTradeClear - looked at from above.
+            // 11-22: to the side, as the camera looks (+ = right)
+            if (s_cfg.tradeSide != 0.0f) {
+                const float lx = t.look.x - t.pos.x, ly = t.look.y - t.pos.y, ll = Len2(lx, ly);
+                if (ll > 1.0f) {
+                    t.pos.x += ly / ll * s_cfg.tradeSide;
+                    t.pos.y += -lx / ll * s_cfg.tradeSide;
+                }
+            }
+            s_s.tradePush = 0.0f;
+            if ((s_cfg.tradeShot == 0 || s_cfg.tradeShot == 2) && !s_s.tradeBlocked) {  // 11-22: not face to face (in front of the head)
+                constexpr float kTradeClear = 30.0f;
+                const auto&     P = s_s.player;
+                const auto&     N = s_s.npc;
+                for (int i = 0; i < 8; ++i) {
+                    const float ux = N.x - t.pos.x, uy = N.y - t.pos.y;
+                    const float len = Len2(ux, uy);
+                    if (len < 1.0f) break;
+                    const float nx = ux / len, ny = uy / len;
+                    const float along = (P.x - t.pos.x) * nx + (P.y - t.pos.y) * ny;
+                    if (along <= 0.0f || along >= len) break;  // you are not between the camera and the NPC
+                    const float s = nx * (P.y - t.pos.y) - ny * (P.x - t.pos.x);  // your distance off the line, + = to its left
+                    if (std::fabs(s) >= kTradeClear) break;
+                    // a sideways step of the camera moves the line at you by (len - along) / len of it (the NPC is the pivot)
+                    const float need = (kTradeClear - std::fabs(s)) * len / (std::max)(len - along, 1.0f);
+                    const float sgn  = s >= 0.0f ? -1.0f : 1.0f;  // away from your side of the line
+                    t.pos.x += -ny * sgn * need;
+                    t.pos.y += nx * sgn * need;
+                    s_s.tradePush += need;
+                }
+            }
+            t.pos.z += s_cfg.tradeHeight;
+            if (s_cfg.tradeFov > 1.0f) {
+                t.fov = s_cfg.tradeFov;
+            } else if (s_cfg.tradeShot == 3 || s_s.tradeBlocked) {
+                t.fov = FitFov(t, kFaceHalf);   // 11-22: face to face - the lens for where Distance / Side / Height put the camera
+            }
+            return t;
+        }
+
+        const char* TradeShotName() {
+            if (s_s.tradeBlocked) return "face to face (a wall was in the way)";
+            return s_cfg.tradeShot == 3 ? "face to face" : s_cfg.tradeShot == 1 ? "both from the side" : s_cfg.tradeShot == 2 ? "close on the NPC" : "over your shoulder";
+        }
+
         Target ShotTarget(Shot shot) {
+            if (s_s.tradeHold) return TradeTarget();
             const float side = s_cfg.swapSide ? -1.0f : 1.0f;
             if (shot == Shot::kOverPlayer) return OverShoulder(s_s.player, s_s.npc, side);
             return s_cfg.reverseKind == 1 ? TwoShot(s_s.player, s_s.npc, side) : OverShoulder(s_s.npc, s_s.player, side);
@@ -466,7 +645,7 @@ namespace ConvoCam {
         // camera that began under the open menu ended with the menu's reduced controls and left the player unable to move
         // (2026-10-24). So the session arms on the player's activation of the NPC (TESActivateEvent), a moment before the dialogue
         // opens, and gives the camera back if no dialogue comes.
-        void Arm(RE::Actor* spk) {
+        void Arm(RE::Actor* spk, const char* a_how = nullptr) {
             if (!spk) return;
             s_s             = Session{};
             s_s.st          = St::kStarting;
@@ -476,7 +655,11 @@ namespace ConvoCam {
             if (auto* cam = Cam(); cam && cam->currentState) s_s.firstPerson = cam->currentState->id == RE::CameraStates::kFirstPerson;
             const char* nm  = spk->GetDisplayFullName();
             s_s.speakerName = nm ? nm : "";
-            Event(std::format("you activated {} - camera starting", s_s.speakerName.empty() ? "an NPC" : s_s.speakerName));
+            if (a_how) {
+                Event(std::format("{} {} - camera starting", s_s.speakerName.empty() ? "an NPC" : s_s.speakerName, a_how));
+            } else {
+                Event(std::format("you activated {} - camera starting", s_s.speakerName.empty() ? "an NPC" : s_s.speakerName));
+            }
             LogControls("before the free camera begins");
             SlccBridge::RequestEnterFreeFly("Conversation camera");
         }
@@ -511,8 +694,15 @@ namespace ConvoCam {
                 return &s;
             }
             RE::BSEventNotifyControl ProcessEvent(const RE::TESActivateEvent* evt, RE::BSTEventSource<RE::TESActivateEvent>*) override {
-                if (!evt || !s_cfg.enabled || !evt->actionRef || !evt->actionRef->IsPlayerRef() || !evt->objectActivated)
+                if (!evt || !s_cfg.enabled || !evt->actionRef || !evt->objectActivated) return RE::BSEventNotifyControl::kContinue;
+                // An NPC activating the player (a force-greet may do this): log only, the per-frame check starts the camera.
+                if (!evt->actionRef->IsPlayerRef()) {
+                    if (evt->objectActivated->IsPlayerRef()) {
+                        const char* nm = evt->actionRef->GetDisplayFullName();
+                        SKSE::log::info("ConvoCam: {} activated the player", nm ? nm : "an actor");
+                    }
                     return RE::BSEventNotifyControl::kContinue;
+                }
                 auto* actor = evt->objectActivated->As<RE::Actor>();
                 if (!actor) return RE::BSEventNotifyControl::kContinue;
                 const auto handle = actor->CreateRefHandle();
@@ -604,6 +794,14 @@ namespace ConvoCam {
                 return;
             }
             RunPressWatch(now);
+            // A held Dialogue Menu never waits long: Drive lets it through once the camera is in, else it goes through here.
+            if (const double held = HeldFor(); held >= 0.0) {
+                if (held > 2.0) {
+                    ReleaseHeld("the camera did not come in time");
+                } else if (s_s.st == St::kOff && held > 0.5) {
+                    ReleaseHeld("no camera session for it");
+                }
+            }
             if (s_s.st == St::kOff) {
                 RememberControls();
                 CheckControlsAfter();
@@ -705,6 +903,55 @@ namespace ConvoCam {
             if (w >= 1.0f) FinishReturn();
         }
 
+        // --Claude 11-22: the camera put on a shot at once (a cut): its cylindrical place round the midpoint m and what it looks at,
+        // at rest; the wall push is solved afresh for the new place instead of easing over from the old one.
+        void CutTo(const Target& t, const RE::NiPoint3& m) {
+            s_s.ang  = std::atan2(t.pos.x - m.x, t.pos.y - m.y);
+            s_s.rad  = Len2(t.pos.x - m.x, t.pos.y - m.y);
+            s_s.z    = t.pos.z;
+            s_s.fov  = t.fov;
+            s_s.look = t.look;
+            s_s.vAng = s_s.vRad = s_s.vZ = s_s.vFov = 0.0f;
+            s_s.vLook = {};
+            g_turnPending = false;
+            CamCollision::SnapNext();
+        }
+
+        // --Claude 11-22: the player turns to face the NPC (about 230 deg/s at most, easing in at the end), from 9 deg off
+        void TurnToFace(RE::PlayerCharacter* p, RE::Actor* npc, float dt) {
+            if (!p || !npc || dt <= 0.0f) return;
+            if (p->IsOnMount() || p->AsActorState()->GetSitSleepState() != RE::SIT_SLEEP_STATE::kNormal) return;
+            const auto a = p->GetPosition(), b = npc->GetPosition();
+            if (Len2(b.x - a.x, b.y - a.y) < 1.0f) return;
+            const float cur  = p->GetAngleZ();
+            const float diff = WrapPi(std::atan2(b.x - a.x, b.y - a.y) - cur);
+            if (!s_s.turning) {
+                if (std::fabs(diff) < 0.15f) return;
+                s_s.turning = true;
+                if (!s_s.turnLogged) {
+                    s_s.turnLogged = true;
+                    Event(std::format("turning you {:.0f} deg to face {}", diff * 57.2958f, s_s.speakerName));
+                } else if (s_s.turnBacks < 12) {
+                    // 11-22: something else may turn the player
+                    // away after the first turn - logged with what the dialogue is doing then, and turned back
+                    ++s_s.turnBacks;
+                    auto* mtm = RE::MenuTopicManager::GetSingleton();
+                    SKSE::log::info("ConvoCam: something turned you {:.0f} deg away from {} (heading now {:.0f} deg) - turning back; topic info {}, "
+                                    "your voice {}, their voice {}, shot {}",
+                        -diff * 57.2958f, s_s.speakerName, cur * 57.2958f, mtm && mtm->currentTopicInfo ? "set" : "none",
+                        VoicePlaying(p) ? "playing" : "not playing", VoicePlaying(npc) ? "playing" : "not playing", ShotName(s_s.shot));
+                }
+            }
+            if (std::fabs(diff) < 0.03f) {
+                s_s.turning = false;
+                return;
+            }
+            const float maxStep = 4.0f * dt;
+            float       step    = diff * (std::min)(1.0f, dt * 9.0f);
+            if (std::fabs(step) < 0.01f) step = diff > 0.0f ? (std::min)(diff, 0.01f) : (std::max)(diff, -0.01f);
+            p->SetHeading(WrapPi(cur + std::clamp(step, -maxStep, maxStep)));
+        }
+
         void DriveRun(RE::FreeCameraState* fcs, float dt) {
             auto* player = RE::PlayerCharacter::GetSingleton();
             auto  ref    = s_s.speaker.get();
@@ -713,6 +960,9 @@ namespace ConvoCam {
                 BeginReturn(0.6f, "the speaker is gone");
                 return;
             }
+            // --Claude 11-21: under a trade menu the paused game gives dt 0; with Keep moving on the shot runs on real time (its
+            // sway goes on and it follows the two when another mod keeps their animation stepping under the pause)
+            if (s_cfg.tradeLive && TradeMenuOpen()) dt = g_realDt;
             const RE::NiPoint3 pRaw = EyePoint(player);
             const RE::NiPoint3 nRaw = EyePoint(npc);
             if (!s_s.seeded) {
@@ -726,16 +976,117 @@ namespace ConvoCam {
                 s_s.npc       = Mix(s_s.npc, nRaw, w);
             }
             s_s.clock += dt;
+            // --Claude 11-22: turn the player to face the NPC - one can talk to someone standing behind; the shots on the player
+            // then show their face and Face to face looks past their head. Not under a trade menu (the game is paused there).
+            if (s_cfg.faceSpeaker && !TradeMenuOpen()) TurnToFace(player, npc, dt);
 
             // Which shot: over the player's shoulder while the NPC talks, the reverse while it is the player's turn - never
             // sooner than minShotSec after the last change.
             const double now     = Now();
-            const Shot   wanted  = (s_cfg.alternate && s_s.seenMenu && DialogueOpen() && !NpcTalking() && s_s.clock > 0.5f) ? Shot::kReverse : Shot::kOverPlayer;
-            if (wanted != s_s.shot && now - s_s.shotSince >= s_cfg.minShotSec) {
+            // --Claude 11-21: such a menu pauses the game, so the damped swing below stopped wherever it was when the menu opened
+            // and every barter looked different. Under it the camera goes to the trade shot and stays there; after the menu the
+            // talk carries on from that shot. 11-22: with Keep moving (real time under the menu) it glides there like a change
+            // of shot, carrying on from however it was moving; without it the paused game gives no time to glide, so it is set
+            // at once as before.
+            if (TradeMenuOpen()) {
+                if (!s_s.tradeHold) {
+                    s_s.tradeHold = true;
+                    s_s.shot      = Shot::kOverPlayer;
+                    g_turnPending = false;
+                    if (!s_cfg.tradeLive) {
+                        s_s.player = pRaw;
+                        s_s.npc    = nRaw;
+                    }
+                    // 11-22: the shoulder shot (or the close one) with a wall between it and the NPC - face to face instead, for this
+                    // menu (decided once, so it does not flip back and forth)
+                    s_s.tradeBlocked = false;
+                    if (s_cfg.tradeShot == 0 || s_cfg.tradeShot == 2) {
+                        constexpr float    kBlocked = 30.0f;
+                        const Target       sh       = TradeTarget();
+                        const RE::NiPoint3 clear    = CamCollision::ClearSpot(sh.look, sh.pos, "trade shot");
+                        const float        dx = clear.x - sh.pos.x, dy = clear.y - sh.pos.y, dz = clear.z - sh.pos.z;
+                        const float        in = std::sqrt(dx * dx + dy * dy + dz * dz);
+                        if (in > kBlocked) {
+                            s_s.tradeBlocked = true;
+                            Event(std::format("the shoulder trade shot is {:.0f} units into a wall - face to face for this menu", in));
+                        }
+                    }
+                    const Target t0 = ShotTarget(s_s.shot);  // also measures tradePush for the line below
+                    if (s_cfg.tradeShot == 3 || s_s.tradeBlocked) {
+                        const float dx = t0.look.x - t0.pos.x, dy = t0.look.y - t0.pos.y, dz = t0.look.z - t0.pos.z;
+                        SKSE::log::info("ConvoCam: face to face - the camera {:.0f} units from {}'s face, {:.0f} between you, FOV {:.0f}",
+                            std::sqrt(dx * dx + dy * dy + dz * dz), s_s.speakerName, Len2(s_s.npc.x - s_s.player.x, s_s.npc.y - s_s.player.y), t0.fov);
+                    }
+                    if (s_cfg.tradeLive) {
+                        s_s.settle = s_cfg.shotSwitch;
+                    } else {
+                        const auto m0 = Mix(s_s.player, s_s.npc, 0.5f);
+                        s_s.ang  = std::atan2(t0.pos.x - m0.x, t0.pos.y - m0.y);
+                        s_s.rad  = Len2(t0.pos.x - m0.x, t0.pos.y - m0.y);
+                        s_s.z    = t0.pos.z;
+                        s_s.fov  = t0.fov;
+                        s_s.look = t0.look;
+                        s_s.vAng = s_s.vRad = s_s.vZ = s_s.vFov = 0.0f;
+                        s_s.vLook = {};
+                    }
+                    Event(std::format("a menu opened over the talk - camera {} the trade shot ({}) until it closes{}{}",
+                        s_cfg.tradeLive ? std::format("gliding over {:.1f} s to", s_cfg.shotSwitch) : "set at once on", TradeShotName(),
+                        s_s.tradePush > 0.5f ? std::format(", moved {:.0f} units out so your head is off the NPC", s_s.tradePush) : "",
+                        s_cfg.tradeLive ? ", moving on real time" : ""));
+                }
+                s_s.shotSince = now;
+            } else if (s_s.tradeHold) {
+                s_s.tradeHold    = false;
+                s_s.tradeBlocked = false;
+                s_s.shotSince = now;
+            }
+            // --Claude 11-22: a picked line is the PLAYER's first - a player-voice mod (DBReV) says it and the NPC's reply waits for
+            // it - but the topic info is set from the pick. So the camera stays on the player until the NPC's own voice starts;
+            // a reply with no sound at all turns it after kHoldSilent. Logged twice a second for the first 6 s of each line.
+            constexpr double         kHoldSilent = 10.0;
+            const RE::TESTopicInfo* info        = NpcTalking() ? RE::MenuTopicManager::GetSingleton()->currentTopicInfo : nullptr;
+            if (info != s_s.lastInfo) {
+                s_s.lastInfo = info;
+                if (info) {
+                    s_s.pickAt       = now;
+                    s_s.npcVoiceSeen = false;
+                    s_s.nextVoiceLog = now;
+                }
+            }
+            bool holdOnPlayer = false;
+            if (info && !s_s.npcVoiceSeen) {
+                const bool npcVoice = VoicePlaying(npc);
+                if (now >= s_s.nextVoiceLog && now - s_s.pickAt < 6.0) {
+                    s_s.nextVoiceLog = now + 0.5;
+                    SKSE::log::info("ConvoCam: line +{:.2f} s - {}'s voice {}, your voice {}", now - s_s.pickAt, s_s.speakerName,
+                        npcVoice ? "playing" : "not playing", VoicePlaying(player) ? "playing" : "not playing");
+                }
+                if (npcVoice) {
+                    s_s.npcVoiceSeen = true;
+                    Event(std::format("{}'s voice started {:.2f} s after the line began", s_s.speakerName, now - s_s.pickAt));
+                } else if (now - s_s.pickAt > kHoldSilent) {
+                    s_s.npcVoiceSeen = true;
+                    Event(std::format("no voice from {} in {:.0f} s - turning to them anyway", s_s.speakerName, kHoldSilent));
+                } else {
+                    holdOnPlayer = true;
+                }
+            }
+            const bool   playersTurn = s_s.seenMenu && DialogueOpen() && (!info || holdOnPlayer);
+            const Shot   wanted      = (s_cfg.alternate && playersTurn && s_s.clock > 0.5f && !s_s.tradeHold) ? Shot::kReverse : Shot::kOverPlayer;
+            // the NPC's voice starting is a cue of its own: the change waits only 0.5 s after the last one, not minShotSec
+            const bool   voiceCue    = wanted == Shot::kOverPlayer && info != nullptr && s_s.npcVoiceSeen;
+            if (wanted != s_s.shot && (now - s_s.shotSince >= s_cfg.minShotSec || (voiceCue && now - s_s.shotSince >= 0.5))) {
                 s_s.shot      = wanted;
                 s_s.shotSince = now;
                 s_s.settle    = s_cfg.shotSwitch;
-                Event(std::format("shot: {}", ShotName(wanted)));
+                // 11-22: Cut (film) - the camera is put on the new shot at once; Swing - it turns round the two in shotSwitch
+                if (s_cfg.cutShots && !s_s.tradeHold && s_s.clock > s_cfg.blendIn) {
+                    CutTo(ShotTarget(wanted), Mix(s_s.player, s_s.npc, 0.5f));
+                    Event(std::format("shot: {} (cut)", ShotName(wanted)));
+                } else {
+                    g_turnPending = true;
+                    Event(std::format("shot: {}", ShotName(wanted)));
+                }
             } else if (s_s.settle != s_cfg.shotSwitch && now - s_s.shotSince > s_cfg.blendIn) {
                 s_s.settle = s_cfg.shotSwitch;  // the entry is over: later changes use the shot-change time
             }
@@ -748,13 +1099,26 @@ namespace ConvoCam {
             const float tAng = std::atan2(t.pos.x - m.x, t.pos.y - m.y);
             const float tRad = Len2(t.pos.x - m.x, t.pos.y - m.y);
             const float settle = (std::max)(s_s.settle, 0.2f);
-            s_s.ang  = SmoothDampAngle(s_s.ang, tAng, s_s.vAng, settle, 1.3f, dt);
-            s_s.rad  = SmoothDamp(s_s.rad, tRad, s_s.vRad, settle, 240.0f, dt);
-            s_s.z    = SmoothDamp(s_s.z, t.pos.z, s_s.vZ, settle, 150.0f, dt);
-            s_s.fov  = SmoothDamp(s_s.fov, t.fov, s_s.vFov, settle, 22.0f, dt);
-            s_s.look.x = SmoothDamp(s_s.look.x, t.look.x, s_s.vLook.x, settle, 300.0f, dt);
-            s_s.look.y = SmoothDamp(s_s.look.y, t.look.y, s_s.vLook.y, settle, 300.0f, dt);
-            s_s.look.z = SmoothDamp(s_s.look.z, t.look.z, s_s.vLook.z, settle, 300.0f, dt);
+            // 11-22: a change of shot is a half turn round the two; at 1.3 rad/s it took about 3 s whatever 'Change of shot
+            // takes' said (1.0 s gave 2.7 s), longer than the setting asked for. The speed limits now scale with
+            // that time, so the turn ends when the setting says; the entry keeps its old limits.
+            const bool  switching = s_s.settle == s_cfg.shotSwitch;
+            const float angCap    = switching ? (std::max)(1.3f, 6.0f / settle) : 1.3f;
+            const float k         = switching ? (std::max)(1.0f, 2.25f / settle) : 1.0f;
+            s_s.ang  = SmoothDampAngle(s_s.ang, tAng, s_s.vAng, settle, angCap, dt);
+            s_s.rad  = SmoothDamp(s_s.rad, tRad, s_s.vRad, settle, 240.0f * k, dt);
+            s_s.z    = SmoothDamp(s_s.z, t.pos.z, s_s.vZ, settle, 150.0f * k, dt);
+            s_s.fov  = SmoothDamp(s_s.fov, t.fov, s_s.vFov, settle, 22.0f * k, dt);
+            s_s.look.x = SmoothDamp(s_s.look.x, t.look.x, s_s.vLook.x, settle, 300.0f * k, dt);
+            s_s.look.y = SmoothDamp(s_s.look.y, t.look.y, s_s.vLook.y, settle, 300.0f * k, dt);
+            s_s.look.z = SmoothDamp(s_s.look.z, t.look.z, s_s.vLook.z, settle, 300.0f * k, dt);
+            {
+                if (g_turnPending && !s_s.tradeHold && std::fabs(WrapPi(tAng - s_s.ang)) < 0.05f) {
+                    g_turnPending = false;
+                    SKSE::log::info("ConvoCam: {} - the turn took {:.2f} s (change of shot set to {:.1f} s)", ShotName(s_s.shot),
+                        now - s_s.shotSince, s_cfg.shotSwitch);
+                }
+            }
 
             static double s_nextTrace = 0.0;
             if (s_s.clock < 0.05f) s_nextTrace = 0.0;
@@ -777,7 +1141,26 @@ namespace ConvoCam {
             p.roll = 0.0f;
             p.fov  = s_s.fov;
             WritePose(fcs, p);
-            CamCollision::Request(look, "conversation camera");
+            // 11-22: face to face with the camera in or behind the player's head (Distance moved out): the head is hidden, so
+            // it does not block the NPC; shown again as soon as the camera is clear of it
+            bool hideHead = false;
+            if (s_s.tradeHold && (s_cfg.tradeShot == 3 || s_s.tradeBlocked)) {
+                const float d  = (std::max)(Len2(s_s.npc.x - s_s.player.x, s_s.npc.y - s_s.player.y), 1.0f);
+                const float fx = (s_s.npc.x - s_s.player.x) / d, fy = (s_s.npc.y - s_s.player.y) / d;
+                const float rx = p.pos.x - s_s.player.x, ry = p.pos.y - s_s.player.y, rz = p.pos.z - s_s.player.z;
+                const float along = rx * fx + ry * fy;            // + = towards the NPC from the player's head
+                const float off   = std::fabs(rx * fy - ry * fx);  // to the side of the line between them
+                hideHead          = along < 14.0f && off < 26.0f && rz > -30.0f && rz < 40.0f;
+            }
+            if (hideHead) {
+                HidePlayerHead();
+            } else {
+                ShowPlayerHead("the camera is clear of it");
+            }
+            // 11-22: under a trade menu the paused game froze the wall push (0 time) while the shot glided on real time, so the
+            // last push stayed on as the camera went round the two - near walls the push pointed the wrong way. It runs on
+            // real time there now, also when the shot is set at once (its push from the old spot eases off instead of sticking).
+            CamCollision::Request(look, "conversation camera", false, TradeMenuOpen());
         }
     }
 
@@ -797,6 +1180,13 @@ namespace ConvoCam {
         range(s_cfg.fovWide, 20.0f, 110.0f, 56.0f);
         range(s_cfg.drift, 0.0f, 3.0f, 1.0f);
         s_cfg.reverseKind = std::clamp(s_cfg.reverseKind, 0, 1);
+        s_cfg.tradeShot   = std::clamp(s_cfg.tradeShot, 0, 3);
+        range(s_cfg.tradeDistance, 0.4f, 2.5f, 1.0f);
+        range(s_cfg.tradeHeight, -60.0f, 80.0f, 0.0f);
+        range(s_cfg.tradeSide, -80.0f, 80.0f, 0.0f);
+        range(s_cfg.tradeTurn, -90.0f, 90.0f, 0.0f);
+        range(s_cfg.tradeFov, 0.0f, 100.0f, 0.0f);
+        if (s_cfg.tradeFov > 0.0f && s_cfg.tradeFov < 20.0f) s_cfg.tradeFov = 20.0f;
     }
 
     void Install() {
@@ -832,6 +1222,7 @@ namespace ConvoCam {
         if (s_s.st == St::kStarting) {
             s_s.st = St::kRunning;
             Event("conversation camera running");
+            ReleaseHeld("the camera is in");  // the Dialogue Menu opens on top of the free camera, never under it
         }
         DriveRun(fcs, dt);
     }
@@ -898,7 +1289,322 @@ namespace ConvoCam {
         Arm(a);
     }
 
+    // ---- dialogue the NPC starts (force-greet, an NPC walking up to talk) ------------------------------------------
+    // No Activate press, so NotePress / BeginPending never run. The game's dialogue manager says a dialogue has begun
+    // (menuOpen) a moment before the Dialogue Menu itself opens - the same gap the Activate path starts in. The camera may
+    // only begin inside that gap (see Arm): once the menu is open it is too late and the NPC is left to the game's camera.
+    namespace {
+        bool             s_prevTopicMenu = false;
+        bool             s_npcWatch      = false;   // menuOpen came on, waiting for the speaker
+        double           s_npcWatchAt    = 0.0;
+        std::atomic_bool s_npcQueued{ false };
+
+        void BeginNpcStart(RE::ObjectRefHandle a_handle, double a_seenAt) {
+            auto  ref = a_handle.get();
+            auto* a   = ref ? ref->As<RE::Actor>() : nullptr;
+            if (!a) return;
+            const char* nm  = a->GetDisplayFullName();
+            const std::string who = nm ? nm : "an NPC";
+            const double ms = (Now() - a_seenAt) * 1000.0;
+            auto*        mtm = RE::MenuTopicManager::GetSingleton();
+            if (!mtm || !mtm->menuOpen) {
+                SKSE::log::info("ConvoCam: {} started a dialogue - over again {:.0f} ms later, not filming", who, ms);
+                return;
+            }
+            if (s_s.st != St::kOff) return;  // the dialogue menu hold has already started the camera for this talk
+            if (const char* block = ArmBlock(a)) {
+                SKSE::log::info("ConvoCam: {} started a dialogue with you - not filming ({:.0f} ms after it began): {}", who, ms, block);
+                return;
+            }
+            SKSE::log::info("ConvoCam: {} started a dialogue with you - camera starting {:.0f} ms after it began, Dialogue Menu not open yet", who, ms);
+            Arm(a, "started talking to you");
+        }
+    }
+
+    // ---- the dialogue menu hold -----------------------------------------------------------------------------------
+    // The game can open the Dialogue Menu before TFCam sees the talk at all: an NPC walking up to talk, or a talk the
+    // game opens on the Activate PRESS (the release then goes to the open menu and never reaches the handler). The free
+    // camera must begin before that menu opens (see Arm), so the menu's open request is held at the menu queue
+    // (UIMessageQueue::AddMessage, "Dialogue Menu", kShow) until the camera is in, then sent on. It is never lost: a talk
+    // the camera may not film, or a camera that does not come within 2 s, lets it through; a talk that ends while it
+    // waits drops it (its own close is let through).
+    //
+    // The hook only CHAINS onto another mod's jump: in a load order where some mod has already put a jump at
+    // AddMessage's first byte (an absolute FF 25 jump, or a near E9 jump), that jump's target is swapped for ours and
+    // ours calls the old one (see InstallDialogueHold). The swap is one store inside a cache line, so a thread inside
+    // the queue at that moment takes either the old jump or ours, both whole. Anywhere else (the game's own first
+    // bytes, or another kind of hook) nothing is written and the NPC-started talk keeps the game's camera, as before.
+    namespace {
+        using AddMessage_t = void (*)(RE::UIMessageQueue*, const RE::BSFixedString&, RE::UI_MESSAGE_TYPE, RE::IUIMessageData*);
+        AddMessage_t s_prevAdd = nullptr;
+
+        struct Held {
+            bool                on    = false;
+            RE::UIMessageQueue* queue = nullptr;
+            RE::IUIMessageData* data  = nullptr;
+            double              at    = 0.0;
+        };
+        std::mutex        s_holdLock;
+        Held              s_held;
+        std::atomic<bool> s_holding{ false };
+
+        bool IsDialogueMenu(const RE::BSFixedString& a_name) {
+            auto* istr = RE::InterfaceStrings::GetSingleton();
+            return istr && a_name.data() == istr->dialogueMenu.data();  // pooled strings: one pointer per name
+        }
+
+        // Main thread (a task queued by the hook): film this talk, or let its menu through.
+        void DecideHeld() {
+            if (HeldFor() < 0.0) return;
+            if (s_s.st == St::kRunning || s_s.st == St::kReturning) {
+                ReleaseHeld("a conversation camera is already running");
+                return;
+            }
+            if (s_s.st == St::kStarting) {
+                Event("the Dialogue Menu waits - the camera is starting");
+                return;  // Drive lets it through once the camera is in
+            }
+            auto* mtm = RE::MenuTopicManager::GetSingleton();
+            auto  ref = mtm ? mtm->speaker.get() : RE::NiPointer<RE::TESObjectREFR>{};
+            auto* a   = ref ? ref->As<RE::Actor>() : nullptr;
+            if (!a || a->IsPlayerRef()) {
+                ReleaseHeld("no NPC speaking");
+                return;
+            }
+            const char* nm = a->GetDisplayFullName();
+            if (const char* block = ArmBlock(a)) {
+                ReleaseHeld(std::format("not filming {}: {}", nm ? nm : "the NPC", block));
+                return;
+            }
+            s_pending = {};  // a press whose release went to the open menu: this talk is started here instead
+            Arm(a, "is talking to you - the Dialogue Menu waits for the camera");
+        }
+
+        bool HoldShow(RE::UIMessageQueue* a_queue, RE::IUIMessageData* a_data) {
+            if (!s_cfg.enabled) return false;
+            {
+                std::scoped_lock l(s_holdLock);
+                if (s_held.on) return false;  // one at a time
+                s_held = Held{ true, a_queue, a_data, Now() };
+            }
+            s_holding = true;
+            SKSE::log::info("ConvoCam: the Dialogue Menu was asked to open - held until the camera is in");
+            if (auto* tasks = SKSE::GetTaskInterface()) {
+                tasks->AddTask([] { DecideHeld(); });
+            } else {
+                ReleaseHeld("no task interface");
+            }
+            return true;
+        }
+
+        void DropHeld(const char* a_why) {
+            {
+                std::scoped_lock l(s_holdLock);
+                if (!s_held.on) return;
+                s_held = Held{};
+            }
+            s_holding = false;
+            SKSE::log::info("ConvoCam: the held Dialogue Menu was dropped - {}", a_why);
+        }
+
+        // Any thread: the game's (or the previous hook's) AddMessage, with the Dialogue Menu's open request held.
+        void AddMessageThunk(RE::UIMessageQueue* a_queue, const RE::BSFixedString& a_menu, RE::UI_MESSAGE_TYPE a_type, RE::IUIMessageData* a_data) {
+            if (s_prevAdd && IsDialogueMenu(a_menu)) {
+                if (a_type == RE::UI_MESSAGE_TYPE::kShow) {
+                    if (HoldShow(a_queue, a_data)) return;
+                } else if (a_type == RE::UI_MESSAGE_TYPE::kHide || a_type == RE::UI_MESSAGE_TYPE::kForceHide) {
+                    DropHeld("the dialogue was closed while its menu waited");
+                }
+            }
+            s_prevAdd(a_queue, a_menu, a_type, a_data);
+        }
+
+        std::string ModuleOf(std::uintptr_t a_addr) {
+            HMODULE mod = nullptr;
+            if (!::GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                    reinterpret_cast<LPCWSTR>(a_addr), &mod) || !mod) {
+                return std::format("code outside any DLL at {:X}", a_addr);
+            }
+            char path[MAX_PATH]{};
+            ::GetModuleFileNameA(mod, path, MAX_PATH);
+            const char* base = std::strrchr(path, '\\');
+            return std::format("{}+{:X}", base ? base + 1 : path, a_addr - reinterpret_cast<std::uintptr_t>(mod));
+        }
+
+        // Where a jump at a leads, through relays (FF 25 absolute / E9 relative), named by the DLL it ends in. Logging only.
+        std::string DescribeJumpTarget(std::uintptr_t a) {
+            for (int hop = 0; hop < 4 && a; ++hop) {
+                const auto* q = reinterpret_cast<const std::uint8_t*>(a);
+                if (q[0] == 0xFF && q[1] == 0x25 && q[2] == 0 && q[3] == 0 && q[4] == 0 && q[5] == 0) {
+                    a = *reinterpret_cast<const std::uint64_t*>(q + 6);
+                } else if (q[0] == 0xE9) {
+                    a = a + 5 + *reinterpret_cast<const std::int32_t*>(q + 1);
+                } else {
+                    break;
+                }
+            }
+            return ModuleOf(a);
+        }
+
+        // One store inside a cache line is seen whole by a thread running the jump at that moment.
+        bool InOneLine(std::uintptr_t a_addr, std::size_t a_size) { return (a_addr & 63) + a_size <= 64; }
+
+        bool WriteWhole(void* a_at, std::uint64_t a_value, std::size_t a_size) {
+            DWORD old = 0;
+            if (!::VirtualProtect(a_at, a_size, PAGE_EXECUTE_READWRITE, &old)) return false;
+            if (a_size == 8) {
+                *static_cast<volatile std::uint64_t*>(a_at) = a_value;
+            } else {
+                *static_cast<volatile std::uint32_t*>(a_at) = static_cast<std::uint32_t>(a_value);
+            }
+            ::VirtualProtect(a_at, a_size, old, &old);
+            return true;
+        }
+
+        // Main thread, the first camera frame (every mod's own hooks are in by then). Two kinds of jump are chained:
+        //   FF 25 00000000 <8-byte address>  (an absolute jump)  - the address is swapped for AddMessageThunk's
+        //   E9 <4-byte distance>             (a near jump, MinHook / SKSE-trampoline style) - an absolute jump to
+        //      AddMessageThunk goes in TFCam's trampoline (near the game) and the distance is swapped for it.
+        // Either way the old target is what ours calls. Anything else: nothing is written.
+        void InstallDialogueHold() {
+            REL::Relocation<std::uintptr_t> fn{ RELOCATION_ID(13530, 13631) };
+            auto*                         p = reinterpret_cast<std::uint8_t*>(fn.address());
+            const auto                    entry = reinterpret_cast<std::uintptr_t>(p);
+            static constexpr std::uint8_t kAbsJmp[6]{ 0xFF, 0x25, 0x00, 0x00, 0x00, 0x00 };
+            std::uintptr_t                prev = 0;
+            if (std::memcmp(p, kAbsJmp, sizeof(kAbsJmp)) == 0) {
+                if (!InOneLine(entry + 6, 8)) {
+                    SKSE::log::info("ConvoCam: the jump at UIMessageQueue::AddMessage crosses a cache line - no dialogue menu hold");
+                    return;
+                }
+                prev = static_cast<std::uintptr_t>(*reinterpret_cast<volatile std::uint64_t*>(p + 6));
+                if (!prev) return;
+                s_prevAdd = reinterpret_cast<AddMessage_t>(prev);
+                if (!WriteWhole(p + 6, reinterpret_cast<std::uint64_t>(&AddMessageThunk), 8)) {
+                    s_prevAdd = nullptr;
+                    SKSE::log::warn("ConvoCam: could not unprotect UIMessageQueue::AddMessage's jump - no dialogue menu hold");
+                    return;
+                }
+            } else if (p[0] == 0xE9) {
+                if (!InOneLine(entry + 1, 4)) {
+                    SKSE::log::info("ConvoCam: the jump at UIMessageQueue::AddMessage crosses a cache line - no dialogue menu hold");
+                    return;
+                }
+                prev = entry + 5 + *reinterpret_cast<const std::int32_t*>(p + 1);
+                auto* stub = static_cast<std::uint8_t*>(SKSE::GetTrampoline().allocate(14));
+                if (!stub) {
+                    SKSE::log::warn("ConvoCam: no trampoline room for the dialogue menu hold");
+                    return;
+                }
+                const auto dist = static_cast<std::int64_t>(reinterpret_cast<std::uintptr_t>(stub)) - static_cast<std::int64_t>(entry + 5);
+                if (dist < INT32_MIN || dist > INT32_MAX) {
+                    SKSE::log::warn("ConvoCam: TFCam's trampoline is too far from UIMessageQueue::AddMessage - no dialogue menu hold");
+                    return;
+                }
+                std::memcpy(stub, kAbsJmp, sizeof(kAbsJmp));
+                const auto thunk = reinterpret_cast<std::uint64_t>(&AddMessageThunk);
+                std::memcpy(stub + 6, &thunk, sizeof(thunk));
+                s_prevAdd = reinterpret_cast<AddMessage_t>(prev);
+                if (!WriteWhole(p + 1, static_cast<std::uint32_t>(static_cast<std::int32_t>(dist)), 4)) {
+                    s_prevAdd = nullptr;
+                    SKSE::log::warn("ConvoCam: could not unprotect UIMessageQueue::AddMessage's jump - no dialogue menu hold");
+                    return;
+                }
+            } else {
+                SKSE::log::info("ConvoCam: UIMessageQueue::AddMessage starts with {:02X} {:02X} {:02X} {:02X} {:02X} {:02X}, not another mod's jump - "
+                    "no dialogue menu hold, so a talk the NPC starts keeps the game's camera", p[0], p[1], p[2], p[3], p[4], p[5]);
+                return;
+            }
+            ::FlushInstructionCache(::GetCurrentProcess(), p, 14);
+            SKSE::log::info("ConvoCam: dialogue menu hold in - chained ({} jump) after {} (another mod's hook on UIMessageQueue::AddMessage)",
+                p[0] == 0xE9 ? "near" : "absolute", DescribeJumpTarget(prev));
+        }
+    }
+
+    namespace {
+        double HeldFor() {
+            std::scoped_lock l(s_holdLock);
+            return s_held.on ? Now() - s_held.at : -1.0;
+        }
+
+        void ReleaseHeld(const std::string& a_why) {
+            Held h;
+            {
+                std::scoped_lock l(s_holdLock);
+                if (!s_held.on) return;
+                h      = s_held;
+                s_held = Held{};
+            }
+            s_holding = false;
+            const double ms  = (Now() - h.at) * 1000.0;
+            auto*        mtm = RE::MenuTopicManager::GetSingleton();
+            auto*        istr = RE::InterfaceStrings::GetSingleton();
+            if (!mtm || !mtm->menuOpen || !istr || !s_prevAdd) {
+                SKSE::log::info("ConvoCam: the held Dialogue Menu was dropped after {:.0f} ms - the dialogue is over ({})", ms, a_why);
+                return;
+            }
+            SKSE::log::info("ConvoCam: the Dialogue Menu let through after {:.0f} ms - {}", ms, a_why);
+            s_prevAdd(h.queue, istr->dialogueMenu, RE::UI_MESSAGE_TYPE::kShow, h.data);
+        }
+    }
+
+    void FrameCheck() {
+        static bool s_holdTried = false;
+        if (!s_holdTried) {
+            s_holdTried = true;
+            InstallDialogueHold();
+        }
+        auto*        mtm  = RE::MenuTopicManager::GetSingleton();
+        const bool   open = mtm && mtm->menuOpen;
+        const double now  = Now();
+        if (open && !s_prevTopicMenu) {
+            s_npcWatch   = true;
+            s_npcWatchAt = now;
+        }
+        s_prevTopicMenu = open;
+        if (!open) s_npcWatch = false;
+        if (s_holding.load()) {  // the hold has this talk (DecideHeld)
+            s_npcWatch = false;
+            return;
+        }
+        if (!s_npcWatch) return;
+        // The Activate path, a session already running, or the camera turned off: nothing to do for this dialogue.
+        if (!s_cfg.enabled || s_s.st != St::kOff || s_pending) {
+            s_npcWatch = false;
+            return;
+        }
+        auto  ref = mtm->speaker.get();
+        auto* a   = ref ? ref->As<RE::Actor>() : nullptr;
+        if (!a) {
+            if (now - s_npcWatchAt > 0.5) {
+                SKSE::log::info("ConvoCam: a dialogue began with no speaker set - not filming");
+                s_npcWatch = false;
+            }
+            return;
+        }
+        s_npcWatch = false;
+        if (a->IsPlayerRef()) return;
+        auto* ui = RE::UI::GetSingleton();
+        if (ui && ui->IsMenuOpen("Dialogue Menu")) {
+            const char* nm = a->GetDisplayFullName();
+            SKSE::log::info("ConvoCam: {} started a dialogue - the Dialogue Menu was already open when seen, not filming", nm ? nm : "an NPC");
+            return;
+        }
+        // Not from inside the camera update itself: the free camera begins at the next task point.
+        if (s_npcQueued.exchange(true)) return;
+        const auto handle = a->CreateRefHandle();
+        if (auto* tasks = SKSE::GetTaskInterface()) {
+            tasks->AddTask([handle, now] {
+                s_npcQueued = false;
+                BeginNpcStart(handle, now);
+            });
+        } else {
+            s_npcQueued = false;
+        }
+    }
+
     void OnGameLoad(const char* a_why) {
+        DropHeld(a_why);  // a menu held across a load belongs to a dialogue that no longer exists
         if (s_s.st != St::kOff) Event(std::format("{} - session dropped", a_why));
         ResetSession();
     }

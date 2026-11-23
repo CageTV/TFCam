@@ -73,6 +73,8 @@ namespace FovFx {
         };
         std::vector<Pulse> s_pulses;
         bool               s_bowDrawn  = false;
+        bool               s_bowDraw   = false;  // 11-22: from the arrow coming out of the quiver to the release (the archer camera)
+        bool               s_bowFull   = false;  // 11-22: the string is fully back (kBowDrawn)
         double             s_bowStart  = 0.0;
         float              s_bowNow    = 0.0f;  // the pull, smoothed
         double             s_last      = 0.0;
@@ -209,15 +211,16 @@ namespace FovFx {
         if (!std::isfinite(s.strength)) s.strength = 1.0f;
         s.strength   = std::clamp(s.strength, 0.0f, 2.0f);
         s.spellLevel = std::clamp(s.spellLevel, 0, 100);
-        if (!std::isfinite(s.aimTurn)) s.aimTurn = 22.0f;
-        if (!std::isfinite(s.aimBack)) s.aimBack = 61.0f;
-        if (!std::isfinite(s.aimUp)) s.aimUp = -1.0f;
+        const Settings d{};
+        if (!std::isfinite(s.aimTurn)) s.aimTurn = d.aimTurn;
+        if (!std::isfinite(s.aimBack)) s.aimBack = d.aimBack;
+        if (!std::isfinite(s.aimUp)) s.aimUp = d.aimUp;
         s.aimTurn = std::clamp(s.aimTurn, -110.0f, 110.0f);
         s.aimBack = std::clamp(s.aimBack, 10.0f, 400.0f);  // 10-31: further out (was 120)
         s.aimUp   = std::clamp(s.aimUp, -80.0f, 80.0f);    // 10-31: was -20..30
-        if (!std::isfinite(s.aimDotSize)) s.aimDotSize = 1.2f;
+        if (!std::isfinite(s.aimDotSize)) s.aimDotSize = d.aimDotSize;
         s.aimDotSize = std::clamp(s.aimDotSize, 0.5f, 8.0f);
-        if (!std::isfinite(s.aimVignette)) s.aimVignette = 0.0f;
+        if (!std::isfinite(s.aimVignette)) s.aimVignette = d.aimVignette;
         s.aimVignette = std::clamp(s.aimVignette, 0.0f, 1.0f);
     }
 
@@ -299,6 +302,20 @@ namespace FovFx {
         static double       s_wallHold  = 0.0;    // stays in this long after the last push
         static RE::NiPoint3 s_headOff{};          // 10-31: the head's offset from your feet, in your own frame, eased
         static bool         s_haveHead  = false;  //        (the hold animation sways the head; the camera must not sway)
+        // 11-22: the draw's timeline, for landing the camera when the head has stopped (see below)
+        static bool         s_drawWas    = false;
+        static double       s_drawAt     = 0.0;    // the arrow came out of the quiver
+        static double       s_attachAt   = 0.0;    // the arrow went on the string (0 = not yet)
+        static bool         s_arrived    = false;  // the camera may land
+        static const char*  s_arriveWhy  = "";
+        static double       s_arriveAt   = 0.0;
+        static bool         s_headMoved  = false;
+        static double       s_headStopAt = 0.0;
+        static float        s_headSpeed  = 0.0f;   // the head against your feet, in your frame (units / s, eased)
+        static float        s_headPeak   = 0.0f;
+        static float        s_stillFor   = 0.0f;
+        static RE::NiPoint3 s_headPrev{};
+        static bool         s_havePrev   = false;
         const double        now         = Now();
         const float         dt          = s_aimLast > 0.0 ? static_cast<float>(std::clamp(now - s_aimLast, 0.0, 0.1)) : 0.0f;
         s_aimLast                       = now;
@@ -310,7 +327,9 @@ namespace FovFx {
             s_aimW     = 0.0f;
             s_haveAim  = false;
             s_haveHead = false;
+            s_havePrev = false;
             s_wasDrawn = false;
+            s_drawWas  = false;
             s_wallOff  = {};
             s_pubOn    = false;
             s_pubIn    = 0.0f;
@@ -319,14 +338,52 @@ namespace FovFx {
         }
         if (s_wasDrawn && !s_bowDrawn) s_holdUntil = now + kAimHold;
         s_wasDrawn = s_bowDrawn;
+        // 11-22: the camera came in over the first 0.6 s of the pull and the head was still moving after it had arrived
+        // (some bow animations turn the head to the arrow late), so the shot drifted on at the end. Now it starts as the arrow
+        // comes out of the quiver, goes most of the way (kApproach) while the head moves, and lands once the arrow is on the
+        // string and the head has stopped - in as the pull begins. A head that never settles lands it kMaxWait after the arrow
+        // went on the string; a draw straight after a shot (the camera still in) stays in.
+        constexpr float  kApproach = 0.7f;
+        constexpr float  kMoving   = 40.0f;  // head speed against your feet (units / s) that counts as moving
+        constexpr float  kStill    = 15.0f;  // ... and as stopped, for kStillSec
+        constexpr float  kStillSec = 0.08f;
+        constexpr double kMaxWait  = 1.2;
+        if (s_bowDraw && !s_drawWas) {
+            s_drawAt     = now;
+            s_attachAt   = 0.0;
+            s_arrived    = s_aimW > 0.9f;
+            s_arriveWhy  = s_arrived ? "the camera was still in from the last shot" : "";
+            s_arriveAt   = s_arrived ? now : 0.0;
+            s_headMoved  = false;
+            s_headStopAt = 0.0;
+            s_headPeak   = 0.0f;
+            s_stillFor   = 0.0f;
+        }
+        s_drawWas = s_bowDraw;
+        if (s_bowDraw && s_bowDrawn && s_attachAt <= 0.0) s_attachAt = now;
+        if (s_bowDraw && !s_arrived && s_attachAt > 0.0) {
+            if (s_headMoved && s_stillFor >= kStillSec) {
+                s_arrived   = true;
+                s_arriveWhy = "the head stopped";
+            } else if (!s_headMoved && now - s_attachAt >= 0.1) {
+                s_arrived   = true;
+                s_arriveWhy = "the head did not move";
+            } else if (now - s_attachAt >= kMaxWait) {
+                s_arrived   = true;
+                s_arriveWhy = "the head kept moving - landed anyway";
+            }
+            if (s_arrived) s_arriveAt = now;
+        }
         if (!(ui && ui->GameIsPaused())) {
-            const float target = s_bowDrawn || now < s_holdUntil ? 1.0f : 0.0f;
-            const float tau    = target > s_aimW ? 0.22f : 0.2f;  // 10-31: in over the pull (was 0.12)
+            const bool  hold   = now < s_holdUntil;
+            const float target = s_bowDraw ? (s_arrived ? 1.0f : kApproach) : (hold ? 1.0f : 0.0f);
+            const float tau    = target < s_aimW ? 0.2f : (s_arrived || hold ? 0.1f : 0.22f);
             s_aimW += (target - s_aimW) * (dt > 0.0f ? 1.0f - std::exp(-dt / tau) : 0.0f);
         }
         if (s_aimW < 0.002f) {
             s_haveAim  = false;
             s_haveHead = false;
+            s_havePrev = false;
             s_wallOff  = {};
             s_pubOn    = false;
             s_pubIn    = 0.0f;
@@ -340,16 +397,23 @@ namespace FovFx {
         RE::NiTransform    t    = root->world;
         const auto&        m    = t.rotate.entry;
         const RE::NiPoint3 view{ m[0][1], m[1][1], m[2][1] };  // the game's view (your mouse)
-        const float        h  = player->GetAngleZ();
-        const float        ah = player->GetAimHeading();  // the way the shot leaves the bow
-        const RE::NiPoint3 f{ std::sin(ah), std::cos(ah), 0.0f };
-        const RE::NiPoint3 r{ f.y, -f.x, 0.0f };  // your right
+        const float        h    = player->GetAngleZ();
+        const float        ah   = player->GetAimHeading();  // the way the shot leaves the bow
         const float        flat = std::hypot(view.x, view.y);
-        const RE::NiPoint3 dir{ f.x * flat, f.y * flat, view.z };  // the aim heading at the view's height (unit length)
+        // 11-22: when the shots go through the middle of the screen anyway (TFCam's own aim or Hit Where You Aim) the
+        // frame follows your view's heading, not the body's. True Directional Movement turns you to face the crosshair
+        // during the draw, and a frame hung off that turn swung in late, at the end of the pull. Without either, the
+        // body's aim heading still sets it: that is where the arrow goes.
+        const bool         steered = AimDot::Active() || s_hwya;
+        const float        yaw     = steered && flat > 0.05f ? std::atan2(view.x, view.y) : ah;
+        const RE::NiPoint3 f{ std::sin(yaw), std::cos(yaw), 0.0f };
+        const RE::NiPoint3 r{ f.y, -f.x, 0.0f };  // your right
+        const RE::NiPoint3 dir{ f.x * flat, f.y * flat, view.z };  // that heading at the view's height (unit length)
         // The eyes, steadied (10-31): the head bone sways through the hold animation and the camera hung off it, so the
         // shot swayed too. The head's offset from your feet is kept in your own frame (turning with you) and eased; your
         // feet move the camera at once, the sway does not.
         RE::NiPoint3 eye;
+        float        headGap = 0.0f;  // how far the steadied head still trails the real one (units)
         {
             const RE::NiPoint3 feet = player->GetPosition();
             const RE::NiPoint3 off  = head->world.translate - feet;
@@ -359,7 +423,34 @@ namespace FovFx {
                 s_headOff  = local;
                 s_haveHead = true;
             } else {
-                s_headOff = s_headOff + (local - s_headOff) * (1.0f - std::exp(-dt / 0.3f));
+                // 11-22: quick while the camera is still moving in (the pull carries the head forward and down; eased at
+                // 0.3 s the camera kept drifting after the pull had stopped), the slow steadying only once it is in and the
+                // string is fully back (the hold's sway); through the pull the head stays put in the frame.
+                const float tau = s_aimW < 0.98f || !s_bowFull ? 0.08f : 0.3f;
+                s_headOff = s_headOff + (local - s_headOff) * (1.0f - std::exp(-dt / tau));
+            }
+            headGap = (local - s_headOff).Length();
+            // how fast the head moves against your feet: the camera lands once it has stopped
+            if (dt > 0.0f) {
+                if (s_havePrev) {
+                    const float raw = (local - s_headPrev).Length() / dt;
+                    s_headSpeed += (raw - s_headSpeed) * (1.0f - std::exp(-dt / 0.04f));
+                }
+                s_headPrev = local;
+                s_havePrev = true;
+                if (s_bowDraw && !s_arrived) {
+                    s_headPeak = (std::max)(s_headPeak, s_headSpeed);
+                    if (s_headSpeed > kMoving) {
+                        s_headMoved  = true;
+                        s_stillFor   = 0.0f;
+                        s_headStopAt = 0.0;
+                    } else if (s_headSpeed < kStill) {
+                        if (s_stillFor <= 0.0f) s_headStopAt = now;
+                        s_stillFor += dt;
+                    } else {
+                        s_stillFor = 0.0f;
+                    }
+                }
             }
             const RE::NiPoint3 back{ s_headOff.x * ch + s_headOff.y * sh, -s_headOff.x * sh + s_headOff.y * ch, s_headOff.z };  // by +h
             eye = feet + back + RE::NiPoint3{ sh * 4.0f, ch * 4.0f, 7.0f };
@@ -406,9 +497,9 @@ namespace FovFx {
         }
         // 10-31: when the projectiles go through the middle of the screen anyway (TFCam's own aim or Hit Where You Aim)
         // the view keeps your aim's direction - looking at the arrow line's hit made the world swing whenever that
-        // hit jumped between a near tree and the far sky ("the crosshair jumps around", user). The arrow-line look
+        // hit jumped between a near tree and the far sky, and the middle of the screen with it. The arrow-line look
         // stays for the case where nothing corrects the arrow.
-        RE::NiPoint3 look = AimDot::Active() || s_hwya ? dir : aimAt - want;
+        RE::NiPoint3 look = steered ? dir : aimAt - want;
         look              = look * (1.0f / (std::max)(look.Length(), 1e-3f));
         const float w     = SmoothStep(s_aimW);
         {
@@ -455,8 +546,17 @@ namespace FovFx {
         static bool s_logged = false;
         if (!s_logged && s_aimW > 0.95f) {
             s_logged = true;
-            SKSE::log::info("FovFx: archer camera in - {:.0f} units from the eyes, aim point {:.0f} out from the arrow tip",
-                (want - eye).Length(), s_reach);
+            float off = (ah - std::atan2(view.x, view.y)) * 57.29578f;  // the body's aim heading against the view, degrees
+            while (off > 180.0f) off -= 360.0f;
+            while (off < -180.0f) off += 360.0f;
+            SKSE::log::info("FovFx: archer camera in - {:.0f} units from the eyes, aim point {:.0f} out from the arrow tip; framed on {} "
+                "(the body's aim heading is {:.0f} deg off the view); zoom {:.1f} of {:.1f} deg, head trailing {:.1f} units",
+                (want - eye).Length(), s_reach, steered ? "your view" : "the body's aim", off, s_bowNow * s_settings.strength,
+                s_settings.bow ? kBowPull * s_settings.strength : 0.0f, headGap);
+            const auto at = [](double t) { return t > 0.0 ? std::format("+{:.2f} s", t - s_drawAt) : std::string("-"); };
+            SKSE::log::info("FovFx: archer draw - arrow on the string {}, head {} (fastest {:.0f} units/s), {} {}, camera in {}",
+                at(s_attachAt), s_headMoved ? std::format("stopped {}", at(s_headStopAt)) : std::string("never moved"), s_headPeak,
+                s_arriveWhy, at(s_arriveAt), at(now));
         }
         if (s_aimW < 0.05f) s_logged = false;
     }
@@ -500,13 +600,19 @@ namespace FovFx {
                 using A           = RE::ATTACK_STATE_ENUM;
                 const A    st      = player->AsActorState()->GetAttackState();
                 // 10-31: from kBowAttached, not kBowDraw - kBowDraw is the arrow coming out of the quiver; the string is pulled
-                // between the arrow attaching and kBowDrawn, and the user wants the view to move WITH the pull.
+                // between the arrow attaching and kBowDrawn, so from there the view moves with the pull.
                 const bool drawing = st == A::kBowAttached || st == A::kBowDrawn;
                 if (drawing && !s_bowDrawn) s_bowStart = now;
                 s_bowDrawn = drawing;
+                // 11-22: the archer camera starts with the arrow coming out of the quiver, so it can be in as the pull
+                // begins (it lands once the head has stopped, see ApplyAimCam)
+                s_bowDraw = drawing || st == A::kBowDraw;
+                s_bowFull = st == A::kBowDrawn;
             }
         } else {
             s_bowDrawn = false;  // your actions only count when the camera is on you
+            s_bowDraw  = false;
+            s_bowFull  = false;
         }
 
         // speed: yours (on foot / on a horse) or the free camera's
@@ -545,9 +651,16 @@ namespace FovFx {
             SKSE::log::info("FovFx: speed stretch over");
         }
 
-        // the bow's pull while drawn, eased back after
-        const float bowTarget = s_bowDrawn && s_settings.bow ? kBowPull * SmoothStep(static_cast<float>(now - s_bowStart) / kBowPullTime) : 0.0f;
-        s_bowNow += (bowTarget - s_bowNow) * (dt > 0.0f ? 1.0f - std::exp(-dt / (s_bowDrawn ? 0.15f : 0.08f)) : 0.0f);
+        // the bow's pull while drawn, eased back after. 11-22: with the archer camera on, the pull follows the camera's own
+        // move in (the same SmoothStep of its weight), so the zoom and the move into the shot end together; the separate
+        // 0.6 s pull plus its 0.15 s easing ran on about a third of a second after the camera had arrived.
+        const bool  withCam   = s_settings.aimCam && s_pubOn;
+        const bool  pulling   = withCam ? s_bowDraw : s_bowDrawn;  // 11-22: with the camera from the quiver on, as the camera moves
+        const float bowTarget = !(pulling && s_settings.bow) ? 0.0f
+                              : withCam ? kBowPull * SmoothStep(s_pubIn)
+                                        : kBowPull * SmoothStep(static_cast<float>(now - s_bowStart) / kBowPullTime);
+        const float bowTau    = withCam && pulling ? 0.03f : (s_bowDrawn ? 0.15f : 0.08f);
+        s_bowNow += (bowTarget - s_bowNow) * (dt > 0.0f ? 1.0f - std::exp(-dt / bowTau) : 0.0f);
 
         float pulses = 0.0f;
         for (const auto& p : s_pulses) {

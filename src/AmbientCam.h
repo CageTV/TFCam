@@ -35,6 +35,7 @@ namespace AmbientCam {
         bool  dolly           = true;
         bool  spiral          = true;
         float crossfade       = 1.5f;    // seconds between routines
+        float routineSpeed    = 1.0f;    // 11-22: both routines play this much faster (0.25..3); the blends and 'runs for' stay real time
         float returnTime      = 0.7f;    // seconds back to the normal camera
         float interiorScale   = 0.6f;    // radii / distances in interior cells
         // dolly zoom
@@ -68,6 +69,7 @@ namespace AmbientCam {
     bool OwnsMotion();                                       // a routine / blend moves the camera
     void OnInput(RE::InputEvent* const* a_events);           // input sink, every batch
     void OnFreeCamEnd();                                     // before the vanilla End
+    void OnFreeCamBegin(bool a_tfcamDriving, bool a_selfToggle);  // after the vanilla Begin
     void OnGameLoad(const char* a_why);
     void OnPlayerSceneStart();
 

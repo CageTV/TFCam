@@ -1,5 +1,7 @@
 #include "FreeCamMenu.h"
 #include "FovFx.h"
+#include "FrameFx.h"
+#include "VideoCapture.h"
 #include "FreeCamController.h"
 #include "FreezeTime.h"
 #include "CameraLight.h"
@@ -8,6 +10,8 @@
 #include "AimDot.h"
 #include "CamBlur.h"
 #include "CamPath.h"
+#include "CamPathPrisma.h"
+#include "CamPathWindow.h"
 #include "SceneCam.h"
 #include "AmbientCam.h"
 #include "ConvoCam.h"
@@ -351,8 +355,21 @@ namespace FreeCamMenu {
         WriteINIInt("Blur", "bEnabled", b.enabled ? 1 : 0);
         WriteINIFloat("Blur", "fStrength", b.strength);
         WriteINIInt("Blur", "bInFreeFly", b.inFreeFly ? 1 : 0);
-        WriteINIInt("Blur", "iStyle", b.style);  // 0.18.0: 0 edges (TFCam's own), 1 ENB depth of field
+        WriteINIInt("Blur", "iStyle", b.style);  // 10-31: 0 edges (TFCam's own), 1 ENB depth of field
         WriteINIFloat("Blur", "fSharpMiddle", b.sharp);
+        WriteINIInt("Blur", "bKeepSubjectSharp", b.keepSubject ? 1 : 0);  // 11-13: edges blur only what is behind the subject
+        WriteINIFloat("Blur", "fSubjectDepth", b.subjectDepth);
+        WriteINIFloat("Blur", "fBlurRampDepth", b.rampDepth);
+        const auto& c = CamPath::Get();
+        WriteINIInt("CameraPath", "iOpenWindowKey", c.openKey);
+        WriteINIInt("CameraPath", "iAddCameraKey", c.addKey);
+        WriteINIInt("CameraPath", "iPlayKey", c.playKey);
+        WriteINIInt("CameraPath", "iRecordKey", c.recordKey);
+        WriteINIFloat("CameraPath", "fSmoothness", c.smoothness);
+        WriteINIFloat("CameraPath", "fAimHeight", c.aimHeight);
+        WriteINIInt("CameraPath", "bShowPath", c.showPath ? 1 : 0);
+        WriteINIInt("CameraPath", "bPrismaEditor", c.prismaEditor ? 1 : 0);
+        WriteINIInt("CameraPath", "bSceneAutoPlay", c.sceneAutoPlay ? 1 : 0);   // 11-14 round 13: SexLab scene paths
         const auto& f = FovFx::Get();  // 0.18.0
         WriteINIInt("ActionFOV", "bEnabled", f.enabled ? 1 : 0);
         WriteINIFloat("ActionFOV", "fStrength", f.strength);
@@ -367,22 +384,32 @@ namespace FreeCamMenu {
         WriteINIFloat("ActionFOV", "fArcherTurn", f.aimTurn);
         WriteINIFloat("ActionFOV", "fArcherDistance", f.aimBack);
         WriteINIFloat("ActionFOV", "fArcherUp", f.aimUp);
-        WriteINIInt("ActionFOV", "bArcherDot", f.aimDot ? 1 : 0);
+        WriteINIInt("ActionFOV", "bArcherDot", f.aimDot ? 1 : 0);  // 10-31
         WriteINIFloat("ActionFOV", "fArcherDotSize", f.aimDotSize);
         WriteINIInt("ActionFOV", "bArcherBlur", f.aimBlur ? 1 : 0);
         WriteINIFloat("ActionFOV", "fArcherVignette", f.aimVignette);
-        WriteINIInt("AimDot", "bHitTheDot", AimDot::Get().enabled ? 1 : 0);
-        const auto& c = CamPath::Get();
-        WriteINIInt("CameraPath", "bCurved", c.curved ? 1 : 0);
-        WriteINIInt("CameraPath", "bCut", c.snap ? 1 : 0);
-        WriteINIFloat("CameraPath", "fDuration", c.duration);
-        WriteINIInt("CameraPath", "iLoop", c.loop);
-        WriteINIInt("CameraPath", "iLook", c.look);
-        WriteINIInt("CameraPath", "iFocus", c.focus);
-        WriteINIFloat("CameraPath", "fFocusHeight", c.focusHeight);
-        WriteINIInt("CameraPath", "bFollowFocus", c.followFocus ? 1 : 0);
-        WriteINIInt("CameraPath", "iAddPointKey", c.addKey);
-        WriteINIInt("CameraPath", "iPlayKey", c.playKey);
+        WriteINIInt("AimDot", "bHitTheDot", AimDot::Get().enabled ? 1 : 0);  // 10-31
+        WriteINIInt("AimDot", "bHideGameCrosshair", AimDot::Get().hideGameCrosshair ? 1 : 0);
+        const auto& x = FrameFx::Get();  // 0.18.0
+        WriteINIInt("ImageFX", "iMotionBlur", x.motionBlur);
+        WriteINIFloat("ImageFX", "fShutter", x.shutter);
+        WriteINIFloat("ImageFX", "fLongestSmear", x.maxBlur);
+        WriteINIInt("ImageFX", "bZoomBlur", x.zoomBlur ? 1 : 0);
+        WriteINIInt("ImageFX", "iLens", x.lens);
+        WriteINIFloat("ImageFX", "fDistortion", x.distortion);
+        WriteINIFloat("ImageFX", "fFringe", x.fringe);
+        WriteINIFloat("ImageFX", "fVignette", x.vignette);
+        WriteINIFloat("ImageFX", "fStreaks", x.streaks);
+        WriteINIFloat("ImageFX", "fStreakFrom", x.streakFrom);
+        WriteINIInt("ImageFX", "bCinemaBars", x.bars ? 1 : 0);
+        const auto& v = VideoCapture::Get();
+        WriteINIInt("Video", "iHeight", v.height);
+        WriteINIInt("Video", "iFps", v.fps);
+        WriteINIInt("Video", "iQuality", v.quality);
+        WriteINIInt("Video", "bSound", v.audio ? 1 : 0);
+        WriteINIInt("Video", "bWithCameraPath", v.withPath ? 1 : 0);
+        WriteINIInt("Video", "iKey", v.key);
+        WriteINIString("Video", "sFolder", VideoCapture::Folder().c_str());   // 11-14 round 12: "" = Data\Movies
     }
 
     // 0.16.0 conversation camera, TFCam.ini [Conversation].
@@ -405,6 +432,15 @@ namespace FreeCamMenu {
         WriteINIInt("Conversation", "bSwapSide", c.swapSide ? 1 : 0);
         WriteINIFloat("Conversation", "fDrift", c.drift);
         WriteINIInt("Conversation", "bNoEdgePan", c.noEdgePan ? 1 : 0);
+        WriteINIInt("Conversation", "iTradeShot", c.tradeShot);
+        WriteINIFloat("Conversation", "fTradeDistance", c.tradeDistance);
+        WriteINIFloat("Conversation", "fTradeHeight", c.tradeHeight);
+        WriteINIFloat("Conversation", "fTradeSide", c.tradeSide);
+        WriteINIFloat("Conversation", "fTradeTurn", c.tradeTurn);
+        WriteINIFloat("Conversation", "fTradeFov", c.tradeFov);
+        WriteINIInt("Conversation", "bTradeLive", c.tradeLive ? 1 : 0);
+        WriteINIInt("Conversation", "bCutShots", c.cutShots ? 1 : 0);
+        WriteINIInt("Conversation", "bFaceSpeaker", c.faceSpeaker ? 1 : 0);
     }
 
     // 0.12.0 walls for the automatic cameras, TFCam.ini [Collision].
@@ -431,6 +467,7 @@ namespace FreeCamMenu {
         WriteINIInt("Idle", "bDolly", a.dolly ? 1 : 0);
         WriteINIInt("Idle", "bSpiral", a.spiral ? 1 : 0);
         WriteINIFloat("Idle", "fCrossfade", a.crossfade);
+        WriteINIFloat("Idle", "fSpeed", a.routineSpeed);
         WriteINIFloat("Idle", "fReturnTime", a.returnTime);
         WriteINIFloat("Idle", "fInteriorScale", a.interiorScale);
         WriteINIFloat("Idle", "fDollyFraming", a.dollyFraming);
@@ -493,6 +530,16 @@ namespace FreeCamMenu {
             SKSE::log::error("FreeCamMenu: saving the Scene Camera settings to {} FAILED (Windows error {}) - they only last "
                              "until the game closes", GetINIPath(), s_saveWriteErr);
         }
+    }
+
+    void SaveCamPathSettings() { SaveINI(); }
+
+    // Never null: a key without a name in GetKeyName shows as "Key <code>" (a null went into std::format and threw).
+    const char* KeyName(int a_dxScanCode) {
+        if (const char* name = GetKeyName(a_dxScanCode)) return name;
+        static thread_local char buf[24];
+        std::snprintf(buf, sizeof(buf), "Key %d", a_dxScanCode);
+        return buf;
     }
 
     static void ApplyToController() {
@@ -579,8 +626,9 @@ namespace FreeCamMenu {
         return changed;
     }
 
+    // TFCam > Free camera page (until 0.19.0 "Settings", with the camera light at the bottom).
     static void __stdcall RenderSettings() {
-        ImGuiMCP::SeparatorText("Free Fly Camera");
+        ImGuiMCP::SeparatorText("Keys");
 
         if (KeyBindField("freeFly", "Toggle Free Camera", &s_freeFlyKey)) {
             SaveINI();
@@ -605,29 +653,28 @@ namespace FreeCamMenu {
         ImGuiMCP::TextColored({ 0.5f, 0.5f, 0.5f, 1.0f },
             "Hold to fly faster. Unset by default. Ctrl + mouse wheel changes the base speed while flying.");
 
-        if (ImGuiMCP::Checkbox("Disable Shift in free cam##noshift", &s_disableShift)) {
+        if (KeyBindField("rollCCW", "Roll Left", &s_rollCCWKey)) {
             ApplyToController();
             SaveINI();
         }
-        if (ImGuiMCP::Checkbox("Disable Space / Jump in free cam##nospace", &s_disableSpace)) {
+        if (KeyBindField("rollCW", "Roll Right", &s_rollCWKey)) {
             ApplyToController();
             SaveINI();
         }
-        ImGuiMCP::TextColored({ 0.5f, 0.5f, 0.5f, 1.0f },
-            "Ticked, while flying: Shift no longer drives sprint / run / run toggle (a Shift+key run "
-            "toggle too), and Jump is blocked on any key or gamepad. Mods that read a key directly "
-            "may still see it. Unticked: the key works as it does without TFCam. Either way, in a "
-            "SexLab scene Space still reaches SexLab (Advance), and a mod that closes the free camera "
-            "on Jump (Poser Hotkeys Plus) cannot close one it did not open.");
-        if (ImGuiMCP::Checkbox("Disable Activate in free cam##noactivate", &s_disableActivate)) {
+        if (KeyBindField("resetK", "Reset FOV / Roll", &s_resetKey)) {
             ApplyToController();
             SaveINI();
         }
-        ImGuiMCP::TextColored({ 0.5f, 0.5f, 0.5f, 1.0f },
-            "Stops E / gamepad A from sitting you on furniture or using a door the camera is pointing at.");
+        if (KeyBindField("freezeK", "Freeze Time (keyboard)", &s_freezeTimeKey)) {
+            ApplyToController();
+            SaveINI();
+        }
+        if (KeyBindField("sshotK", "Screenshot (keyboard)", &s_screenshotKey)) {
+            ApplyToController();
+            SaveINI();
+        }
 
-        ImGuiMCP::Separator();
-
+        ImGuiMCP::SeparatorText("Movement");
         ImGuiMCP::SetNextItemWidth(150.0f);
         if (ImGuiMCP::SliderFloat("Camera Speed##speed", &s_cameraSpeed, 0.5f, 50.0f, "%.1f")) {
             auto* ini = RE::INISettingCollection::GetSingleton();
@@ -638,6 +685,7 @@ namespace FreeCamMenu {
             SaveINI();
         }
 
+        ImGuiMCP::SeparatorText("Zoom and roll");
         ImGuiMCP::SetNextItemWidth(150.0f);
         if (ImGuiMCP::SliderFloat("FOV Step (mouse wheel)##fov", &s_fovStep, 0.5f, 10.0f, "%.1f")) {
             ApplyToController();
@@ -663,10 +711,32 @@ namespace FreeCamMenu {
             SaveINI();
         }
 
+        ImGuiMCP::SeparatorText("While flying");
         if (ImGuiMCP::Checkbox("Hide HUD in Free Cam##hideHud", &s_hideHUD)) {
             HUDHider::SetEnabled(s_hideHUD);
             SaveINI();
         }
+
+        if (ImGuiMCP::Checkbox("Disable Shift in free cam##noshift", &s_disableShift)) {
+            ApplyToController();
+            SaveINI();
+        }
+        if (ImGuiMCP::Checkbox("Disable Space / Jump in free cam##nospace", &s_disableSpace)) {
+            ApplyToController();
+            SaveINI();
+        }
+        ImGuiMCP::TextColored({ 0.5f, 0.5f, 0.5f, 1.0f },
+            "Ticked, while flying: Shift no longer drives sprint / run / run toggle (a Shift+key run "
+            "toggle too), and Jump is blocked on any key or gamepad. Mods that read a key directly "
+            "may still see it. Unticked: the key works as it does without TFCam. Either way, in a "
+            "SexLab scene Space still reaches SexLab (Advance), and a mod that closes the free camera "
+            "on Jump (Poser Hotkeys Plus) cannot close one it did not open.");
+        if (ImGuiMCP::Checkbox("Disable Activate in free cam##noactivate", &s_disableActivate)) {
+            ApplyToController();
+            SaveINI();
+        }
+        ImGuiMCP::TextColored({ 0.5f, 0.5f, 0.5f, 1.0f },
+            "Stops E / gamepad A from sitting you on furniture or using a door the camera is pointing at.");
 
         // Surgical attack block via AttackBlockHandler hook (no ControlMap — that
         // crashed in free cam; this leaves mouse camera-vertical untouched).
@@ -701,28 +771,18 @@ namespace FreeCamMenu {
         // Menu does not work properly yet; forced off in LoadINI). Code paths kept for a retry.
         // SHELVED 2026-08-29: RaceMenu camera checkbox removed (feature not working; forced off).
 
-        if (KeyBindField("rollCCW", "Roll Left", &s_rollCCWKey)) {
-            ApplyToController();
-            SaveINI();
-        }
-        if (KeyBindField("rollCW", "Roll Right", &s_rollCWKey)) {
-            ApplyToController();
-            SaveINI();
-        }
-        if (KeyBindField("resetK", "Reset FOV / Roll", &s_resetKey)) {
-            ApplyToController();
-            SaveINI();
-        }
-        if (KeyBindField("freezeK", "Freeze Time (keyboard)", &s_freezeTimeKey)) {
-            ApplyToController();
-            SaveINI();
-        }
-        if (KeyBindField("sshotK", "Screenshot (keyboard)", &s_screenshotKey)) {
-            ApplyToController();
-            SaveINI();
-        }
+        ImGuiMCP::Separator();
+        ImGuiMCP::TextColored({ 0.5f, 0.5f, 0.5f, 1.0f },
+            "Alt: Slow camera | Shift+MMB / Key: Freeze | MMB / Key: Screenshot");
 
-        ImGuiMCP::SeparatorText("Camera Light");
+        if (FreezeTime::IsFrozen()) {
+            ImGuiMCP::TextColored({ 0.3f, 0.8f, 1.0f, 1.0f }, "Time: FROZEN");
+        }
+    }
+
+    // TFCam > Camera light page (until 0.19.0 the bottom of the free camera page).
+    static void __stdcall RenderLight() {
+        ImGuiMCP::SeparatorText("Camera light");
 
         if (CameraLight::IsActive()) {
             ImGuiMCP::TextColored({ 1.0f, 0.9f, 0.4f, 1.0f }, "Light: ON");
@@ -764,9 +824,13 @@ namespace FreeCamMenu {
             SaveINI();
         }
 
-        ImGuiMCP::TextColored(
+        // A filled swatch: the menu font has no block glyph, so text-drawn squares came out as '?'.
+        ImGuiMCP::ColorButton("##camLightSwatch",
             { s_lightColorR / 255.0f, s_lightColorG / 255.0f, s_lightColorB / 255.0f, 1.0f },
-            "Color Preview ████████");
+            ImGuiMCP::ImGuiColorEditFlags_NoTooltip | ImGuiMCP::ImGuiColorEditFlags_NoDragDrop,
+            { 200.0f, 20.0f });
+        ImGuiMCP::SameLine();
+        ImGuiMCP::Text("Colour");
 
         // --- Presets ---
         struct LightPreset {
@@ -811,22 +875,15 @@ namespace FreeCamMenu {
 
         ImGuiMCP::TextColored({ 0.5f, 0.5f, 0.5f, 1.0f },
             "Shift+Scroll Up: Light on/brighter | Shift+Scroll Down: dimmer/off");
-
-        ImGuiMCP::Separator();
-        ImGuiMCP::TextColored({ 0.5f, 0.5f, 0.5f, 1.0f },
-            "Alt: Slow camera | Shift+MMB / Key: Freeze | MMB / Key: Screenshot");
-
-        if (FreezeTime::IsFrozen()) {
-            ImGuiMCP::TextColored({ 0.3f, 0.8f, 1.0f, 1.0f }, "Time: FROZEN");
-        }
     }
 
-    // 0.9.0: FreeCam > Cell Entry page.
+
+    // 0.9.0: TFCam > Cell entry page.
     static void __stdcall RenderCellEntry() {
         auto& ce = CellEntryCam::GetSettings();
         bool changed = false;
 
-        ImGuiMCP::SeparatorText("Cell Entry Camera");
+        ImGuiMCP::SeparatorText("Cell entry camera");
         ImGuiMCP::TextColored({ 0.5f, 0.5f, 0.5f, 1.0f },
             "After a loading screen into a new cell, the third-person camera zooms to a set distance, then orbits "
             "round the player until it faces them. Any mouse movement stops it at once and gives the camera back.");
@@ -872,64 +929,79 @@ namespace FreeCamMenu {
         ImGuiMCP::TextColored({ 0.5f, 0.5f, 0.5f, 1.0f }, "Last: %s", CellEntryCam::LastEvent());
     }
 
-    // 0.10.0: FreeCam > Scene Camera page.
+    // 0.17.0 background blur (every TFCam camera). After 0.19.0: at the top of the Image and video page.
+    static void RenderBackgroundBlur() {
+        auto&      bl       = CamBlur::Get();
+        const auto bs       = CamBlur::GetStatus();
+        bool       bChanged = false;
+        const bool enbStyle = bl.style == CamBlur::kStyleEnb;
+        ImGuiMCP::SeparatorText("Background blur");
+        // 10-31: two styles; the edge blur (TFCam's own image pass) is the default - the ENB depth of field blurred
+        // everything past the subject and could not go strong enough.
+        static const char* const kBlurStyles[] = { "Blurry round the edge, sharp in the middle (TFCam's own)",
+            "ENB's depth of field (sharp at the subject's distance)" };
+        ImGuiMCP::SetNextItemWidth(360.0f);
+        bChanged |= ImGuiMCP::Combo("How##blStyle", &bl.style, kBlurStyles, 2, -1);
+        ImGuiMCP::BeginDisabled(enbStyle && !bs.linked);
+        bChanged |= ImGuiMCP::Checkbox("Blur the background##blOn", &bl.enabled);
+        ImGuiMCP::SetNextItemWidth(200.0f);
+        bChanged |= ImGuiMCP::SliderFloat("Strength##blStrength", &bl.strength, 0.0f, 1.0f, "%.2f");
+        if (!enbStyle) {
+            ImGuiMCP::SetNextItemWidth(200.0f);
+            bChanged |= ImGuiMCP::SliderFloat("Sharp middle (how far out)##blSharp", &bl.sharp, 0.05f, 0.9f, "%.2f");
+        // 11-13: Keep the subject sharp - blur only what is behind the subject
+            bChanged |= ImGuiMCP::Checkbox("Keep the subject sharp (blur only what is behind)##blKeep", &bl.keepSubject);
+            ImGuiMCP::BeginDisabled(!bl.keepSubject);
+            ImGuiMCP::SetNextItemWidth(200.0f);
+            bChanged |= ImGuiMCP::SliderFloat("Still sharp behind the subject (units)##blSubjDepth", &bl.subjectDepth, 0.0f,
+                500.0f, "%.0f");
+            ImGuiMCP::SetNextItemWidth(200.0f);
+            bChanged |= ImGuiMCP::SliderFloat("Blur comes in over (units)##blRamp", &bl.rampDepth, 10.0f, 2000.0f, "%.0f");
+            ImGuiMCP::EndDisabled();
+            if (bl.keepSubject) {
+                ImGuiMCP::TextColored({ 0.5f, 0.5f, 0.5f, 1.0f }, "Depth: %s", FrameFx::DepthStatus().c_str());
+            }
+        }
+        bChanged |= ImGuiMCP::Checkbox("Also in plain free-fly (sharp: the middle of the screen)##blFree", &bl.inFreeFly);
+        ImGuiMCP::EndDisabled();
+        if (enbStyle && bs.error[0]) {
+            ImGuiMCP::TextColored({ 0.9f, 0.45f, 0.35f, 1.0f }, "%s", bs.error);
+        } else if (bs.active) {
+            if (enbStyle && bs.distance > 0.0f) {
+                ImGuiMCP::Text("Now: sharp at %s, %.0f units away", bs.what, bs.distance);
+            } else {
+                ImGuiMCP::Text("Now: %s", bs.what);
+            }
+        }
+        if (enbStyle) {
+            ImGuiMCP::TextColored({ 0.5f, 0.5f, 0.5f, 1.0f },
+                "Keeps the subject sharp and blurs what is behind it while orbit, preset view, eye view, a camera path, the "
+                "idle camera or the conversation camera moves the camera. It uses ENB's depth of field, and ENB gets its own "
+                "values back the moment that camera stops (nothing is saved into your ENB preset). Needs ENB.");
+        } else {
+            ImGuiMCP::TextColored({ 0.5f, 0.5f, 0.5f, 1.0f },
+                "While orbit, preset view, eye view, a camera path, the idle camera or the conversation camera moves the "
+                "camera: the picture blurs more and more toward the screen's edge and stays sharp in the middle, on the "
+                "subject. TFCam's own image pass, before the HUD - no ENB needed. Strength 1 is a wash at the edge. With "
+                "Keep the subject sharp, only what is behind the subject blurs (read from the game's depth buffer): the "
+                "subject and anything in front of it stay sharp.");
+        }
+        if (bChanged) {
+            CamBlur::Clamp();
+            SaveINI();
+        }
+    }
+
+    // 0.10.0: TFCam > Scene camera page.
     static void __stdcall RenderSceneCam() {
         auto& sc      = SceneCam::GetConfig();
         bool  changed = false;
 
-        ImGuiMCP::SeparatorText("Scene Camera");
+        ImGuiMCP::SeparatorText("Scene camera");
         ImGuiMCP::TextColored({ 0.5f, 0.5f, 0.5f, 1.0f },
             "Orbit round your SexLab scene's actors (or a posed actor, or you), look through a partner's eyes, and save a "
             "camera shot per scene stage or per pose. TFCam's free camera does the work: these turn it on when needed.");
 
-        // 0.17.0 background blur (every TFCam camera, kept on this page so it is found)
-        {
-            auto&      bl       = CamBlur::Get();
-            const auto bs       = CamBlur::GetStatus();
-            bool       bChanged = false;
-            const bool enbStyle = bl.style == CamBlur::kStyleEnb;
-            ImGuiMCP::SeparatorText("Background blur");
-            // 0.18.0: two styles; the edge blur (TFCam's own image pass) is the default - the ENB depth of field blurred
-            // everything past the subject and could not go strong enough.
-            static const char* const kBlurStyles[] = { "Blurry round the edge, sharp in the middle (TFCam's own)",
-                "ENB's depth of field (sharp at the subject's distance)" };
-            ImGuiMCP::SetNextItemWidth(360.0f);
-            bChanged |= ImGuiMCP::Combo("How##blStyle", &bl.style, kBlurStyles, 2, -1);
-            ImGuiMCP::BeginDisabled(enbStyle && !bs.linked);
-            bChanged |= ImGuiMCP::Checkbox("Blur the background##blOn", &bl.enabled);
-            ImGuiMCP::SetNextItemWidth(200.0f);
-            bChanged |= ImGuiMCP::SliderFloat("Strength##blStrength", &bl.strength, 0.0f, 1.0f, "%.2f");
-            if (!enbStyle) {
-                ImGuiMCP::SetNextItemWidth(200.0f);
-                bChanged |= ImGuiMCP::SliderFloat("Sharp middle (how far out)##blSharp", &bl.sharp, 0.05f, 0.9f, "%.2f");
-            }
-            bChanged |= ImGuiMCP::Checkbox("Also in plain free-fly (sharp: the middle of the screen)##blFree", &bl.inFreeFly);
-            ImGuiMCP::EndDisabled();
-            if (enbStyle && bs.error[0]) {
-                ImGuiMCP::TextColored({ 0.9f, 0.45f, 0.35f, 1.0f }, "%s", bs.error);
-            } else if (bs.active) {
-                if (enbStyle && bs.distance > 0.0f) {
-                    ImGuiMCP::Text("Now: sharp at %s, %.0f units away", bs.what, bs.distance);
-                } else {
-                    ImGuiMCP::Text("Now: %s", bs.what);
-                }
-            }
-            if (enbStyle) {
-                ImGuiMCP::TextColored({ 0.5f, 0.5f, 0.5f, 1.0f },
-                    "Keeps the subject sharp and blurs what is behind it while orbit, preset view, eye view, a camera path, the "
-                    "idle camera or the conversation camera moves the camera. It uses ENB's depth of field, and ENB gets its own "
-                    "values back the moment that camera stops (nothing is saved into your ENB preset). Needs ENB.");
-            } else {
-                ImGuiMCP::TextColored({ 0.5f, 0.5f, 0.5f, 1.0f },
-                    "While orbit, preset view, eye view, a camera path, the idle camera or the conversation camera moves the "
-                    "camera: the picture blurs more and more toward the screen's edge and stays sharp in the middle, on the "
-                    "subject. TFCam's own image pass, before the HUD - no ENB needed. Strength 1 is a wash at the edge.");
-            }
-            if (bChanged) {
-                CamBlur::Clamp();
-                SaveINI();
-            }
-        }
 
         // Status (a snapshot the game updates every frame while something is going on).
         const auto  ms = SceneCam::GetMenuStatus();
@@ -1037,96 +1109,37 @@ namespace FreeCamMenu {
         }
     }
 
-    // 0.17.0: FreeCam > Camera Path page.
+    // 0.18.0: TFCam > Camera path page - the window does the work; this page opens it and binds its keys.
     static void __stdcall RenderCamPath() {
         auto&                  cp      = CamPath::Get();
         bool                   changed = false;
         const ImGuiMCP::ImVec4 grey{ 0.5f, 0.5f, 0.5f, 1.0f };
-        const auto             ms = CamPath::GetMenuStatus();
 
         ImGuiMCP::SeparatorText("Camera path");
-        ImGuiMCP::TextColored(grey,
-            "Fly the free camera to a spot and add it as a point (A, B, C ...), then the next spot, and so on. Play moves "
-            "the camera through the points - during a SexLab scene, a pose, or anywhere else.");
-        ImGuiMCP::Text("Points: %d%s", ms.points, ms.playing ? "   - playing" : "");
-        if (ms.playing) {
-            ImGuiMCP::Text("Progress: %.0f%%   (%.0f units along the path)", ms.progress * 100.0f, ms.length);
-            ImGuiMCP::Text("Focus: %s", ms.focus);
+        ImGuiMCP::TextWrapped(
+            "Film anything: put cameras around a person or a thing, press Play, and the camera travels from one to the "
+            "next - straight, in a curve, or circling round it.");
+        if (ImGuiMCP::Button("Open the camera path window##cpOpen")) CamPathWindow::Toggle();
+        if (CamPathPrisma::Available()) {
+            ImGuiMCP::SameLine();
+            if (ImGuiMCP::Button("Open the PrismaUI editor##cpPrisma")) CamPathPrisma::Toggle();
+            changed |= ImGuiMCP::Checkbox("The window key opens the PrismaUI editor##cpPrismaKey", &cp.prismaEditor);
+            ImGuiMCP::TextColored(grey, "The editor: cameras on the left, the selected camera on the right, a timeline along the "
+                                        "bottom. Off: the key opens this mod's plain window instead.");
+        } else {
+            ImGuiMCP::TextColored(grey, "With PrismaUI installed the window key opens a full editor instead of this window.");
         }
-        if (ms.lastEvent[0]) ImGuiMCP::TextColored(grey, "Last: %s", ms.lastEvent);
-        ImGuiMCP::BeginDisabled(!ms.freeCam);
-        if (ImGuiMCP::Button("Add point (where the camera is)##cpAdd")) CamPath::RequestAddPoint();
-        ImGuiMCP::EndDisabled();
-        ImGuiMCP::SameLine();
-        ImGuiMCP::BeginDisabled(ms.points == 0);
-        if (ImGuiMCP::Button("Remove last##cpDel")) CamPath::RequestRemoveLast();
-        ImGuiMCP::SameLine();
-        if (ImGuiMCP::Button("Clear##cpClear")) CamPath::RequestClear();
-        ImGuiMCP::EndDisabled();
-        ImGuiMCP::SameLine();
-        ImGuiMCP::BeginDisabled(ms.points < 2 && !ms.playing);
-        if (ImGuiMCP::Button(ms.playing ? "Stop##cpPlay" : "Play##cpPlay")) CamPath::RequestPlay(ms.playing ? 0 : 1);
-        ImGuiMCP::EndDisabled();
-        if (!ms.freeCam) ImGuiMCP::TextColored(grey, "Turn the free camera on to add points.");
+        ImGuiMCP::TextColored(grey, "1. Turn the free camera on (tfc) and fly to a spot.  2. Open the window (its key below) - "
+                                    "the mouse comes back.  3. Add camera here.  4. Close the window, fly somewhere else, "
+                                    "add another.  5. Play.");
 
-        ImGuiMCP::SeparatorText("Movement");
-        {
-            static const char* shapes[] = { "Curved through the points", "Straight lines (eases in and out at each point)" };
-            int k = cp.curved ? 0 : 1;
-            ImGuiMCP::SetNextItemWidth(320.0f);
-            if (ImGuiMCP::Combo("Path##cpShape", &k, shapes, 2)) {
-                cp.curved = k == 0;
-                changed   = true;
-            }
-            static const char* moves[] = { "Glide", "Cut from point to point" };
-            k = cp.snap ? 1 : 0;
-            ImGuiMCP::SetNextItemWidth(320.0f);
-            if (ImGuiMCP::Combo("Move##cpMove", &k, moves, 2)) {
-                cp.snap = k == 1;
-                changed = true;
-            }
-            ImGuiMCP::SetNextItemWidth(200.0f);
-            changed |= ImGuiMCP::SliderFloat("Time for the whole path (s)##cpTime", &cp.duration, 1.0f, 120.0f, "%.0f");
-            static const char* loops[] = { "Once", "Loop", "Back and forth" };
-            k = std::clamp(cp.loop, 0, 2);
-            ImGuiMCP::SetNextItemWidth(200.0f);
-            if (ImGuiMCP::Combo("Repeat##cpLoop", &k, loops, 3)) {
-                cp.loop = k;
-                changed = true;
-            }
-        }
-
-        ImGuiMCP::SeparatorText("Look");
-        {
-            static const char* looks[] = { "At the focus", "The way each point looked (no focus: straight pans and dollies)" };
-            int k = std::clamp(cp.look, 0, 1);
-            ImGuiMCP::SetNextItemWidth(420.0f);
-            if (ImGuiMCP::Combo("Camera looks##cpLook", &k, looks, 2)) {
-                cp.look = k;
-                changed = true;
-            }
-            static const char* focus[] = { "You (your SexLab scene's actors when in one)",
-                "The reference picked in the console (else you)" };
-            k = std::clamp(cp.focus, 0, 1);
-            ImGuiMCP::SetNextItemWidth(420.0f);
-            if (ImGuiMCP::Combo("Focus##cpFocus", &k, focus, 2)) {
-                cp.focus = k;
-                changed  = true;
-            }
-            ImGuiMCP::SetNextItemWidth(200.0f);
-            changed |= ImGuiMCP::SliderFloat("Aim height (units)##cpAim", &cp.focusHeight, -60.0f, 60.0f, "%.0f");
-            changed |= ImGuiMCP::Checkbox("The path moves with the focus##cpFollow", &cp.followFocus);
-        }
-        ImGuiMCP::TextColored(grey,
-            "Roll (Q / E) and FOV (mouse wheel) are kept with each point. Console focus: open the console, click an NPC or "
-            "object, close it - a walking NPC is followed. 'The path moves with the focus' keeps the points relative to the "
-            "focus, so the path follows a moving NPC and works again for the same pose somewhere else. Background blur "
-            "(Scene Camera page) keeps the focus sharp while a path plays.");
-
-        ImGuiMCP::SeparatorText("Hotkeys");
-        ImGuiMCP::TextColored(grey, "Unset until you bind them.");
-        changed |= KeyBindField("cpAddKey", "Add point", &cp.addKey);
-        changed |= KeyBindField("cpPlayKey", "Play / stop", &cp.playKey);
+        ImGuiMCP::SeparatorText("Keys");
+        ImGuiMCP::TextColored(grey, "Unset until you bind them. Bind the window key first - it opens and closes the window "
+                                    "while you fly.");
+        changed |= KeyBindField("cpOpenKey", "Open / close the window", &cp.openKey);
+        changed |= KeyBindField("cpAddKey", "Add camera here", &cp.addKey);
+        changed |= KeyBindField("cpPlayKey", "Play / pause", &cp.playKey);
+        changed |= KeyBindField("cpRecordKey", "Record manual path (start / stop)", &cp.recordKey);
 
         if (changed) {
             CamPath::Clamp();
@@ -1134,7 +1147,112 @@ namespace FreeCamMenu {
         }
     }
 
-    // 0.18.0: FreeCam > Action FOV page.
+    // 0.18.0: TFCam > Image and video page - background blur, TFCam's own image pass (FrameFx) and the video recorder
+    // (VideoCapture).
+    static void __stdcall RenderImageVideo() {
+        auto&                    fx      = FrameFx::Get();
+        auto&                    vc      = VideoCapture::Get();
+        bool                     changed = false;
+        const ImGuiMCP::ImVec4   grey{ 0.5f, 0.5f, 0.5f, 1.0f };
+        static const char* const kWhen[] = { "Off", "With the free / fixed camera", "Always" };
+
+        RenderBackgroundBlur();
+
+        ImGuiMCP::SeparatorText("Motion blur");
+        ImGuiMCP::SetNextItemWidth(260.0f);
+        changed |= ImGuiMCP::Combo("Motion blur##fxBlur", &fx.motionBlur, kWhen, 3, -1);
+        ImGuiMCP::TextColored(grey, "Turning the camera smears the picture like a film camera; moving forward and zooming blur outward "
+                                    "from the middle (crash zoom, Action FOV).");
+        if (fx.motionBlur != FrameFx::kWhenOff) {
+            ImGuiMCP::SetNextItemWidth(220.0f);
+            changed |= ImGuiMCP::SliderFloat("Shutter (how much it smears)##fxShutter", &fx.shutter, 0.05f, 1.0f, "%.2f", 0);
+            ImGuiMCP::SetNextItemWidth(220.0f);
+            changed |= ImGuiMCP::SliderFloat("Longest smear (part of the screen width)##fxMax", &fx.maxBlur, 0.01f, 0.15f, "%.2f", 0);
+            changed |= ImGuiMCP::Checkbox("Zoom blur (moving forward, FOV changes)##fxZoom", &fx.zoomBlur);
+        }
+
+        ImGuiMCP::SeparatorText("Lens");
+        ImGuiMCP::SetNextItemWidth(260.0f);
+        changed |= ImGuiMCP::Combo("Lens effects##fxLens", &fx.lens, kWhen, 3, -1);
+        if (fx.lens != FrameFx::kWhenOff) {
+            ImGuiMCP::SetNextItemWidth(220.0f);
+            changed |= ImGuiMCP::SliderFloat("Distortion (- pincushion / + barrel)##fxDist", &fx.distortion, -1.0f, 1.0f, "%.2f", 0);
+            ImGuiMCP::SetNextItemWidth(220.0f);
+            changed |= ImGuiMCP::SliderFloat("Colour fringes##fxFringe", &fx.fringe, 0.0f, 1.0f, "%.2f", 0);
+            ImGuiMCP::SetNextItemWidth(220.0f);
+            changed |= ImGuiMCP::SliderFloat("Vignette (darker corners)##fxVig", &fx.vignette, 0.0f, 1.0f, "%.2f", 0);
+            ImGuiMCP::SetNextItemWidth(220.0f);
+            changed |= ImGuiMCP::SliderFloat("Anamorphic streaks##fxStreaks", &fx.streaks, 0.0f, 1.0f, "%.2f", 0);
+            if (fx.streaks > 0.0f) {
+                ImGuiMCP::SetNextItemWidth(220.0f);
+                changed |= ImGuiMCP::SliderFloat("Streaks from lights this bright##fxStreakFrom", &fx.streakFrom, 0.3f, 1.0f, "%.2f", 0);
+            }
+            changed |= ImGuiMCP::Checkbox("Cinema bars (2.39:1)##fxBars", &fx.bars);
+        }
+        ImGuiMCP::TextColored(grey, "Image pass: %s", FrameFx::Status().c_str());
+
+        ImGuiMCP::SeparatorText("Video");
+        ImGuiMCP::TextWrapped("Records the picture - with the effects above, without the HUD, menus or these windows - as an MP4 "
+                              "(H.264 with the game's own sound) in the folder below.");
+        if (ImGuiMCP::Button(VideoCapture::Recording() ? "Stop recording##vcToggle" : "Start recording##vcToggle")) VideoCapture::Toggle("menu");
+        ImGuiMCP::SameLine();
+        ImGuiMCP::TextColored(grey, "%s", VideoCapture::Status().c_str());
+        static const char* const kSizes[] = { "The game's own size", "720p", "1080p", "1440p", "2160p (4K)" };
+        static const int         kHeights[] = { 0, 720, 1080, 1440, 2160 };
+        int si = vc.height <= 0 ? 0 : (vc.height <= 720 ? 1 : (vc.height <= 1080 ? 2 : (vc.height <= 1440 ? 3 : 4)));
+        ImGuiMCP::SetNextItemWidth(220.0f);
+        if (ImGuiMCP::Combo("Size##vcSize", &si, kSizes, 5, -1)) {
+            vc.height = kHeights[si];
+            changed   = true;
+        }
+        static const char* const kFps[]  = { "24", "30", "60" };
+        static const int         kRates[] = { 24, 30, 60 };
+        int fi = vc.fps <= 24 ? 0 : (vc.fps <= 30 ? 1 : 2);
+        ImGuiMCP::SetNextItemWidth(220.0f);
+        if (ImGuiMCP::Combo("Frames per second##vcFps", &fi, kFps, 3, -1)) {
+            vc.fps  = kRates[fi];
+            changed = true;
+        }
+        static const char* const kQuality[] = { "Good", "High", "Very high" };
+        ImGuiMCP::SetNextItemWidth(220.0f);
+        changed |= ImGuiMCP::Combo("Quality##vcQuality", &vc.quality, kQuality, 3, -1);
+        changed |= ImGuiMCP::Checkbox("Record the game's sound##vcSound", &vc.audio);
+        ImGuiMCP::TextColored(grey, "Only Skyrim's own sound (Windows 10 2004 or newer) - not Discord or a music player.");
+        changed |= ImGuiMCP::Checkbox("Start and stop with Camera Path playback##vcPath", &vc.withPath);
+        changed |= KeyBindField("vcKey", "Start / stop recording", &vc.key);
+        // 11-14: the folder setting (empty = Data\Movies, which MO2 puts in overwrite\Movies)
+        {
+            static char s_folderBuf[MAX_PATH] = {};
+            static bool s_folderInit          = false;
+            if (!s_folderInit) {
+                snprintf(s_folderBuf, sizeof(s_folderBuf), "%s", VideoCapture::Folder().c_str());
+                s_folderInit = true;
+            }
+            ImGuiMCP::SetNextItemWidth(320.0f);
+            if (ImGuiMCP::InputText("Folder##vcFolder", s_folderBuf, sizeof(s_folderBuf), 0, nullptr, nullptr)) {
+                VideoCapture::SetFolder(s_folderBuf);
+                changed = true;
+            }
+            ImGuiMCP::SameLine();
+            if (ImGuiMCP::Button("Default##vcFolderDef")) {
+                s_folderBuf[0] = '\0';
+                VideoCapture::SetFolder("");
+                changed = true;
+            }
+            ImGuiMCP::TextColored(grey, "Empty = Data\\Movies (with MO2 the videos land in overwrite\\Movies). A full path (D:\\Clips) "
+                                        "or one from the game's folder.");
+            ImGuiMCP::TextColored(grey, "Saves to: %s", VideoCapture::FolderPath().c_str());
+        }
+        ImGuiMCP::TextColored(grey, "Size, rate, quality and sound apply to the next recording.");
+
+        if (changed) {
+            FrameFx::Clamp();
+            VideoCapture::Clamp();
+            SaveINI();
+        }
+    }
+
+    // 0.18.0: TFCam > Action FOV and archery page.
     static void __stdcall RenderActionFov() {
         auto&                  f       = FovFx::Get();
         bool                   changed = false;
@@ -1147,39 +1265,6 @@ namespace FreeCamMenu {
         ImGuiMCP::SetNextItemWidth(220.0f);
         changed |= ImGuiMCP::SliderFloat("How strong##afStrength", &f.strength, 0.0f, 2.0f, "%.1f", 0);
         changed |= ImGuiMCP::Checkbox("Bow: drawing pulls in, letting go snaps out##afBow", &f.bow);
-        changed |= ImGuiMCP::Checkbox("Archer camera: close round your head while the string is drawn##afAim", &f.aimCam);
-        if (f.aimCam && ImGuiMCP::TreeNode("Archer camera position##afAimTree")) {
-            ImGuiMCP::SetNextItemWidth(220.0f);
-            changed |= ImGuiMCP::SliderFloat("Round to your face (0 behind, 90 side-on)##afAimTurn", &f.aimTurn, -110.0f, 110.0f, "%.0f", 0);
-            ImGuiMCP::SetNextItemWidth(220.0f);
-            changed |= ImGuiMCP::SliderFloat("Distance from your head##afAimBack", &f.aimBack, 10.0f, 400.0f, "%.0f", 0);
-            ImGuiMCP::SetNextItemWidth(220.0f);
-            changed |= ImGuiMCP::SliderFloat("Up / down##afAimUp", &f.aimUp, -80.0f, 80.0f, "%.0f", 0);
-            ImGuiMCP::TextColored(grey, "The middle of the screen is where the arrow will land: a line from the arrow tip "
-                                        "along your aim. Minus turns go round your left side.");
-            changed |= ImGuiMCP::Checkbox("A tiny dot where the arrow will land##afAimDot", &f.aimDot);
-            if (f.aimDot) {
-                ImGuiMCP::SetNextItemWidth(220.0f);
-                changed |= ImGuiMCP::SliderFloat("Dot size (pixels at 1080p)##afAimDotSize", &f.aimDotSize, 0.5f, 8.0f, "%.1f", 0);
-            }
-            {
-                // TFCam's own "hit where you aim" - one switch, no menu
-                auto& ad       = AimDot::Get();
-                bool  adChange = ImGuiMCP::Checkbox("Arrows and spells go where the dot is (TFCam's own aim)##afHitDot", &ad.enabled);
-                ImGuiMCP::TextColored(grey, "Aim: %s", AimDot::Status());
-                ImGuiMCP::TextColored(grey, "Off by default. With Hit Where You Aim installed TFCam leaves the aiming to it, "
-                                            "and the dot sits where that mod sends the arrows.");
-                changed |= adChange;
-            }
-            changed |= ImGuiMCP::Checkbox("Blur round the edge of the screen while the string is drawn##afAimBlur", &f.aimBlur);
-            ImGuiMCP::SetNextItemWidth(220.0f);
-            changed |= ImGuiMCP::SliderFloat("Vignette (darker corners) while the string is drawn##afAimVig", &f.aimVignette, 0.0f, 1.0f, "%.2f", 0);
-            if (f.aimBlur) {
-                ImGuiMCP::TextColored(grey, "Strength and the sharp middle come from Background blur on the Scene page "
-                                            "(the \"blurry round the edge\" style).");
-            }
-            ImGuiMCP::TreePop();
-        }
         changed |= ImGuiMCP::Checkbox("Power attacks punch in##afPower", &f.power);
         changed |= ImGuiMCP::Checkbox("Big spells warp out##afSpells", &f.spells);
         if (f.spells) {
@@ -1196,13 +1281,172 @@ namespace FreeCamMenu {
         changed |= ImGuiMCP::Checkbox("Moving fast stretches it (sprint, Whirlwind Sprint, a fast horse)##afSpeed", &f.speedPlayer);
         changed |= ImGuiMCP::Checkbox("The free camera's speed stretches it (flying, camera paths)##afCamSpeed", &f.speedCamera);
         ImGuiMCP::TextColored(grey, "Works on top of any FOV you or other mods set. Off by default.");
+
+        ImGuiMCP::SeparatorText("Archer camera");
+        changed |= ImGuiMCP::Checkbox("Archer camera: close round your head while the string is drawn##afAim", &f.aimCam);
+        if (f.aimCam && !f.enabled) {
+            ImGuiMCP::TextColored(grey, "Needs Action FOV on (the On tick box at the top of this page).");
+        }
+        if (f.aimCam) {
+            ImGuiMCP::SetNextItemWidth(220.0f);
+            changed |= ImGuiMCP::SliderFloat("Round to your face (0 behind, 90 side-on)##afAimTurn", &f.aimTurn, -110.0f, 110.0f, "%.0f", 0);
+            ImGuiMCP::SetNextItemWidth(220.0f);
+            changed |= ImGuiMCP::SliderFloat("Distance from your head##afAimBack", &f.aimBack, 10.0f, 400.0f, "%.0f", 0);
+            ImGuiMCP::SetNextItemWidth(220.0f);
+            changed |= ImGuiMCP::SliderFloat("Up / down##afAimUp", &f.aimUp, -80.0f, 80.0f, "%.0f", 0);
+            ImGuiMCP::TextColored(grey, "The middle of the screen is where the arrow will land: a line from the arrow tip "
+                                        "along your aim. Minus turns go round your left side.");
+            // 10-31: the edge blur and the vignette while the string is drawn
+            changed |= ImGuiMCP::Checkbox("Blur round the edge of the screen while the string is drawn##afAimBlur", &f.aimBlur);
+            ImGuiMCP::SetNextItemWidth(220.0f);
+            changed |= ImGuiMCP::SliderFloat("Vignette (darker corners) while the string is drawn##afAimVig", &f.aimVignette, 0.0f, 1.0f, "%.2f", 0);
+            if (f.aimBlur) {
+                ImGuiMCP::TextColored(grey, "Strength and the sharp middle come from Background blur on the Image and video page "
+                                            "(the \"blurry round the edge\" style).");
+            }
+        }
+
+        ImGuiMCP::SeparatorText("Dot and aim");
+        // 10-31: the dot and TFCam's own aim
+        changed |= ImGuiMCP::Checkbox("A tiny dot where the arrow will land##afAimDot", &f.aimDot);
+        if (f.aimDot) {
+            ImGuiMCP::SetNextItemWidth(220.0f);
+            changed |= ImGuiMCP::SliderFloat("Dot size (pixels at 1080p)##afAimDotSize", &f.aimDotSize, 0.5f, 8.0f, "%.1f", 0);
+        }
+        {
+            // 10-31: TFCam's own "hit where you aim" - one switch, no menu
+            auto& ad       = AimDot::Get();
+            bool  adChange = ImGuiMCP::Checkbox("Arrows and spells go where the dot is (TFCam's own aim)##afHitDot", &ad.enabled);
+            ImGuiMCP::TextColored(grey, "Aim: %s", AimDot::Status());
+            ImGuiMCP::TextColored(grey, "Off by default. With Hit Where You Aim installed TFCam leaves the aiming to it, "
+                                        "and the dot sits where that mod sends the arrows.");
+            changed |= adChange;
+        }
         if (changed) {
             FovFx::Clamp();
             SaveINI();
         }
     }
 
-    // 0.11.0: FreeCam > Idle & Furniture page.
+    // 0.12.0: TFCam > Walls page (until 0.19.0 on the Idle and furniture page).
+    static void __stdcall RenderWalls() {
+        const ImGuiMCP::ImVec4 grey{ 0.5f, 0.5f, 0.5f, 1.0f };
+        ImGuiMCP::SeparatorText("Walls");
+        ImGuiMCP::TextColored(grey,
+            "The idle camera, the conversation camera, the archer camera, the Scene camera orbit and the blends to a "
+            "saved shot (scene, pose, furniture) stop in front of walls and ease back out when the way is clear. People "
+            "are passed through. Your own free-fly is never stopped.");
+        auto& c        = CamCollision::Get();
+        bool  wChanged = false;
+        wChanged |= ImGuiMCP::Checkbox("Stop at walls##cwOn", &c.enabled);
+        ImGuiMCP::SetNextItemWidth(200.0f);
+        wChanged |= ImGuiMCP::SliderFloat("Distance kept from a wall##cwMargin", &c.margin, 4.0f, 60.0f, "%.0f");
+        ImGuiMCP::SetNextItemWidth(200.0f);
+        wChanged |= ImGuiMCP::SliderFloat("Ease back out (s)##cwRet", &c.returnSec, 0.1f, 3.0f, "%.1f");
+        ImGuiMCP::SetNextItemWidth(200.0f);
+        wChanged |= ImGuiMCP::SliderFloat("Ease in to a wall (s)##cwApp", &c.approachSec, 0.0f, 2.0f, "%.2f");
+        ImGuiMCP::SetNextItemWidth(200.0f);
+        wChanged |= ImGuiMCP::SliderFloat("Ignore objects smaller than##cwSmall", &c.ignoreSmall, 0.0f, 200.0f, "%.0f");
+        ImGuiMCP::TextColored(grey, "Sconces, books and things on a table are not walls. 0 = everything counts.");
+        wChanged |= ImGuiMCP::Checkbox("Pass through large items (furniture, big props)##cwLarge", &c.passLarge);
+        wChanged |= ImGuiMCP::Checkbox("Pass through walls (floors and ceilings still stop it)##cwWalls", &c.passWalls);
+        ImGuiMCP::TextColored(grey, "Walls: %s", CamCollision::MenuStatus().c_str());
+        if (wChanged) {
+            CamCollision::Clamp();
+            SaveINI();
+        }
+    }
+
+    // 0.16.0: TFCam > Conversation camera page (until 0.19.0 on the Idle and furniture page).
+    static void __stdcall RenderConvo() {
+        const ImGuiMCP::ImVec4 grey{ 0.5f, 0.5f, 0.5f, 1.0f };
+        auto&      cv        = ConvoCam::Get();
+        bool       cvChanged = false;
+        const auto cs        = ConvoCam::GetMenuStatus();
+        ImGuiMCP::SeparatorText("Conversation camera");
+        ImGuiMCP::TextColored(grey,
+            "While you talk to someone the camera frames the conversation like a film: over your shoulder while the NPC "
+            "speaks, the reverse shot while it is your turn. Every move is damped, so it glides and never cuts or races. "
+            "When the conversation ends it eases back to the game's camera.");
+        ImGuiMCP::Text("Now: %s", cs.state[0] ? cs.state : "-");
+        if (cs.shot[0]) ImGuiMCP::Text("Shot: %s", cs.shot);
+        if (cs.speaker[0]) ImGuiMCP::Text("Speaking with: %s", cs.speaker);
+        cvChanged |= ImGuiMCP::Checkbox("Conversation camera on##cvOn", &cv.enabled);
+        cvChanged |= ImGuiMCP::Checkbox("Third person only##cvTp", &cv.thirdPersonOnly);
+        cvChanged |= ImGuiMCP::Checkbox("No mouse edge-pan in any dialogue (the camera turns it off while it films)##cvEdge", &cv.noEdgePan);
+
+        ImGuiMCP::SeparatorText("Shots");
+        cvChanged |= ImGuiMCP::Checkbox("Reverse shot while it is your turn##cvAlt", &cv.alternate);
+        bool twoShot = cv.reverseKind == 1;
+        if (ImGuiMCP::Checkbox("Wide two-shot instead of over the NPC's shoulder##cvKind", &twoShot)) {
+            cv.reverseKind = twoShot ? 1 : 0;
+            cvChanged      = true;
+        }
+        cvChanged |= ImGuiMCP::Checkbox("Other shoulder##cvSide", &cv.swapSide);
+        // --Claude 11-22
+        cvChanged |= ImGuiMCP::Checkbox("Turn me to face who I talk to##cvFace", &cv.faceSpeaker);
+
+        ImGuiMCP::SeparatorText("Timing");
+        ImGuiMCP::SetNextItemWidth(200.0f);
+        cvChanged |= ImGuiMCP::SliderFloat("Settle on the first shot (s)##cvIn", &cv.blendIn, 0.3f, 6.0f, "%.1f");
+        // --Claude 11-22: Cut (film) or Swing round the two
+        static const char* shotChanges[] = { "Cut", "Swing" };
+        int                shotChange    = cv.cutShots ? 0 : 1;
+        ImGuiMCP::SetNextItemWidth(200.0f);
+        if (ImGuiMCP::Combo("Change of shot##cvCut", &shotChange, shotChanges, 2, 2)) {
+            cv.cutShots = shotChange == 0;
+            cvChanged   = true;
+        }
+        if (!cv.cutShots) {
+            ImGuiMCP::SetNextItemWidth(200.0f);
+            cvChanged |= ImGuiMCP::SliderFloat("Swing takes (s)##cvSw", &cv.shotSwitch, 0.3f, 6.0f, "%.1f");
+        }
+        ImGuiMCP::SetNextItemWidth(200.0f);
+        cvChanged |= ImGuiMCP::SliderFloat("A shot stays at least (s)##cvMin", &cv.minShotSec, 0.5f, 15.0f, "%.1f");
+        ImGuiMCP::SetNextItemWidth(200.0f);
+        cvChanged |= ImGuiMCP::SliderFloat("Back to the game's camera (s)##cvOut", &cv.blendOut, 0.0f, 6.0f, "%.1f");
+
+        ImGuiMCP::SeparatorText("Framing");
+        ImGuiMCP::SetNextItemWidth(200.0f);
+        cvChanged |= ImGuiMCP::SliderFloat("Distance behind the near speaker##cvDist", &cv.distance, 40.0f, 400.0f, "%.0f");
+        ImGuiMCP::SetNextItemWidth(200.0f);
+        cvChanged |= ImGuiMCP::SliderFloat("Sideways (shoulder)##cvSh", &cv.shoulder, -100.0f, 100.0f, "%.0f");
+        ImGuiMCP::SetNextItemWidth(200.0f);
+        cvChanged |= ImGuiMCP::SliderFloat("Height above the eyes##cvH", &cv.height, -40.0f, 80.0f, "%.0f");
+        ImGuiMCP::SetNextItemWidth(200.0f);
+        cvChanged |= ImGuiMCP::SliderFloat("Framed speaker off centre##cvLs", &cv.lookShift, -80.0f, 80.0f, "%.0f");
+        ImGuiMCP::SetNextItemWidth(200.0f);
+        cvChanged |= ImGuiMCP::SliderFloat("FOV over the shoulder##cvF1", &cv.fovNpc, 20.0f, 100.0f, "%.0f");
+        ImGuiMCP::SetNextItemWidth(200.0f);
+        cvChanged |= ImGuiMCP::SliderFloat("FOV two-shot##cvF2", &cv.fovWide, 20.0f, 110.0f, "%.0f");
+        ImGuiMCP::SetNextItemWidth(200.0f);
+        cvChanged |= ImGuiMCP::SliderFloat("Handheld sway##cvDr", &cv.drift, 0.0f, 3.0f, "%.1f");
+
+        // --Claude 11-21: the shot while a menu the talk opened (barter, gift, training) pauses the game
+        ImGuiMCP::SeparatorText("Trade menus (barter, gift, training)");
+        ImGuiMCP::TextColored(grey, "The game pauses under these menus; the camera sits on this shot until the menu closes.");
+        static const char* tradeShots[] = { "Over your shoulder", "Both from the side", "Close on the NPC", "Face to face" };
+        ImGuiMCP::SetNextItemWidth(200.0f);
+        cvChanged |= ImGuiMCP::Combo("Shot##cvTs", &cv.tradeShot, tradeShots, 4, 4);
+        ImGuiMCP::SetNextItemWidth(200.0f);
+        cvChanged |= ImGuiMCP::SliderFloat("Distance (x the shot's)##cvTd", &cv.tradeDistance, 0.4f, 2.5f, "%.2f");
+        ImGuiMCP::SetNextItemWidth(200.0f);
+        cvChanged |= ImGuiMCP::SliderFloat("Height##cvTh", &cv.tradeHeight, -60.0f, 80.0f, "%.0f");
+        ImGuiMCP::SetNextItemWidth(200.0f);
+        cvChanged |= ImGuiMCP::SliderFloat("Side##cvTsd", &cv.tradeSide, -80.0f, 80.0f, "%.0f");   // --Claude 11-22
+        ImGuiMCP::SetNextItemWidth(200.0f);
+        cvChanged |= ImGuiMCP::SliderFloat("Turn round the two (deg)##cvTt", &cv.tradeTurn, -90.0f, 90.0f, "%.0f");
+        ImGuiMCP::SetNextItemWidth(200.0f);
+        cvChanged |= ImGuiMCP::SliderFloat("FOV (0 = the shot's own)##cvTf", &cv.tradeFov, 0.0f, 100.0f, "%.0f");
+        cvChanged |= ImGuiMCP::Checkbox("Keep moving under the menu (sway, follows them)##cvTl", &cv.tradeLive);
+        if (cs.lastEvent[0]) ImGuiMCP::TextColored(grey, "Last: %s", cs.lastEvent);
+        if (cvChanged) {
+            ConvoCam::Clamp();
+            SaveINI();
+        }
+    }
+
+    // 0.11.0: TFCam > Idle and furniture page.
     static void __stdcall RenderAmbient() {
         auto& a       = AmbientCam::Get();
         bool  changed = false;
@@ -1238,39 +1482,15 @@ namespace FreeCamMenu {
         ImGuiMCP::SameLine();
         changed |= ImGuiMCP::Checkbox("Spiral up the body##amSpiral", &a.spiral);
         ImGuiMCP::SetNextItemWidth(200.0f);
+        changed |= ImGuiMCP::SliderFloat("Speed##amSpeed", &a.routineSpeed, 0.25f, 3.0f, "%.2fx");
+        ImGuiMCP::TextColored(grey, "Plays both routines slower or faster (the spiral round you, the dolly zoom and its turn).");
+        ImGuiMCP::SetNextItemWidth(200.0f);
         changed |= ImGuiMCP::SliderFloat("Blend between routines (s)##amXf", &a.crossfade, 0.0f, 5.0f, "%.1f");
         ImGuiMCP::SetNextItemWidth(200.0f);
         changed |= ImGuiMCP::SliderFloat("Back to the normal camera (s)##amRet", &a.returnTime, 0.0f, 3.0f, "%.1f");
         ImGuiMCP::SetNextItemWidth(200.0f);
         changed |= ImGuiMCP::SliderFloat("Distances in interiors##amInt", &a.interiorScale, 0.3f, 1.0f, "%.2f");
-        ImGuiMCP::TextColored(grey, "Smaller circles indoors. Walls are handled below.");
-
-        // 0.12.0
-        ImGuiMCP::SeparatorText("Walls");
-        ImGuiMCP::TextColored(grey,
-            "The idle camera, the Scene Camera orbit and the blends to a saved shot (scene, pose, furniture) stop in front "
-            "of walls and ease back out when the way is clear. People are passed through. Your own free-fly is never stopped.");
-        {
-            auto& c        = CamCollision::Get();
-            bool  wChanged = false;
-            wChanged |= ImGuiMCP::Checkbox("Stop at walls##cwOn", &c.enabled);
-            ImGuiMCP::SetNextItemWidth(200.0f);
-            wChanged |= ImGuiMCP::SliderFloat("Distance kept from a wall##cwMargin", &c.margin, 4.0f, 60.0f, "%.0f");
-            ImGuiMCP::SetNextItemWidth(200.0f);
-            wChanged |= ImGuiMCP::SliderFloat("Ease back out (s)##cwRet", &c.returnSec, 0.1f, 3.0f, "%.1f");
-            ImGuiMCP::SetNextItemWidth(200.0f);
-            wChanged |= ImGuiMCP::SliderFloat("Ease in to a wall (s)##cwApp", &c.approachSec, 0.0f, 2.0f, "%.2f");
-            ImGuiMCP::SetNextItemWidth(200.0f);
-            wChanged |= ImGuiMCP::SliderFloat("Ignore objects smaller than##cwSmall", &c.ignoreSmall, 0.0f, 200.0f, "%.0f");
-            ImGuiMCP::TextColored(grey, "Sconces, books and things on a table are not walls. 0 = everything counts.");
-            wChanged |= ImGuiMCP::Checkbox("Pass through large items (furniture, big props)##cwLarge", &c.passLarge);
-            wChanged |= ImGuiMCP::Checkbox("Pass through walls (floors and ceilings still stop it)##cwWalls", &c.passWalls);
-            ImGuiMCP::TextColored(grey, "Walls: %s", CamCollision::MenuStatus().c_str());
-            if (wChanged) {
-                CamCollision::Clamp();
-                changed = true;
-            }
-        }
+        ImGuiMCP::TextColored(grey, "Smaller circles indoors. Walls: see the Walls page.");
 
         ImGuiMCP::SeparatorText("Dolly zoom");
         ImGuiMCP::SetNextItemWidth(200.0f);
@@ -1319,7 +1539,7 @@ namespace FreeCamMenu {
         ImGuiMCP::SeparatorText("Furniture camera");
         ImGuiMCP::TextColored(grey,
             "A camera shot saved per furniture. Sit down, turn on free-fly, fly to where you want the camera, press the "
-            "Scene Camera 'Save camera shot' key (FreeCam > Scene Camera). From then on, sitting on that furniture "
+            "Scene Camera 'Save camera shot' key (TFCam > Scene camera). From then on, sitting on that furniture "
             "blends the camera there.");
         changed |= ImGuiMCP::Checkbox("Furniture camera on##amFurnOn", &a.furnEnabled);
         ImGuiMCP::SetNextItemWidth(200.0f);
@@ -1332,58 +1552,6 @@ namespace FreeCamMenu {
             ImGuiMCP::TextColored(grey, "Not on furniture.");
         }
         if (ms.lastEvent[0]) ImGuiMCP::TextColored(grey, "Last: %s", ms.lastEvent);
-
-        // 0.16.0
-        {
-            auto& cv = ConvoCam::Get();
-            bool  cvChanged = false;
-            const auto cs = ConvoCam::GetMenuStatus();
-            ImGuiMCP::SeparatorText("Conversation camera");
-            ImGuiMCP::TextColored(grey,
-                "While you talk to someone the camera frames the conversation like a film: over your shoulder while the NPC "
-                "speaks, the reverse shot while it is your turn. Every move is damped, so it glides and never cuts or races. "
-                "When the conversation ends it eases back to the game's camera.");
-            ImGuiMCP::Text("Now: %s", cs.state[0] ? cs.state : "-");
-            if (cs.shot[0]) ImGuiMCP::Text("Shot: %s", cs.shot);
-            if (cs.speaker[0]) ImGuiMCP::Text("Speaking with: %s", cs.speaker);
-            cvChanged |= ImGuiMCP::Checkbox("Conversation camera on##cvOn", &cv.enabled);
-            cvChanged |= ImGuiMCP::Checkbox("Third person only##cvTp", &cv.thirdPersonOnly);
-            cvChanged |= ImGuiMCP::Checkbox("Reverse shot while it is your turn##cvAlt", &cv.alternate);
-            bool twoShot = cv.reverseKind == 1;
-            if (ImGuiMCP::Checkbox("Wide two-shot instead of over the NPC's shoulder##cvKind", &twoShot)) {
-                cv.reverseKind = twoShot ? 1 : 0;
-                cvChanged      = true;
-            }
-            cvChanged |= ImGuiMCP::Checkbox("Other shoulder##cvSide", &cv.swapSide);
-            cvChanged |= ImGuiMCP::Checkbox("No mouse edge-pan in any dialogue (the camera turns it off while it films)##cvEdge", &cv.noEdgePan);
-            ImGuiMCP::SetNextItemWidth(200.0f);
-            cvChanged |= ImGuiMCP::SliderFloat("Settle on the first shot (s)##cvIn", &cv.blendIn, 0.3f, 6.0f, "%.1f");
-            ImGuiMCP::SetNextItemWidth(200.0f);
-            cvChanged |= ImGuiMCP::SliderFloat("Change of shot takes (s)##cvSw", &cv.shotSwitch, 0.3f, 6.0f, "%.1f");
-            ImGuiMCP::SetNextItemWidth(200.0f);
-            cvChanged |= ImGuiMCP::SliderFloat("A shot stays at least (s)##cvMin", &cv.minShotSec, 0.5f, 15.0f, "%.1f");
-            ImGuiMCP::SetNextItemWidth(200.0f);
-            cvChanged |= ImGuiMCP::SliderFloat("Back to the game's camera (s)##cvOut", &cv.blendOut, 0.0f, 6.0f, "%.1f");
-            ImGuiMCP::SetNextItemWidth(200.0f);
-            cvChanged |= ImGuiMCP::SliderFloat("Distance behind the near speaker##cvDist", &cv.distance, 40.0f, 400.0f, "%.0f");
-            ImGuiMCP::SetNextItemWidth(200.0f);
-            cvChanged |= ImGuiMCP::SliderFloat("Sideways (shoulder)##cvSh", &cv.shoulder, -100.0f, 100.0f, "%.0f");
-            ImGuiMCP::SetNextItemWidth(200.0f);
-            cvChanged |= ImGuiMCP::SliderFloat("Height above the eyes##cvH", &cv.height, -40.0f, 80.0f, "%.0f");
-            ImGuiMCP::SetNextItemWidth(200.0f);
-            cvChanged |= ImGuiMCP::SliderFloat("Framed speaker off centre##cvLs", &cv.lookShift, -80.0f, 80.0f, "%.0f");
-            ImGuiMCP::SetNextItemWidth(200.0f);
-            cvChanged |= ImGuiMCP::SliderFloat("FOV over the shoulder##cvF1", &cv.fovNpc, 20.0f, 100.0f, "%.0f");
-            ImGuiMCP::SetNextItemWidth(200.0f);
-            cvChanged |= ImGuiMCP::SliderFloat("FOV two-shot##cvF2", &cv.fovWide, 20.0f, 110.0f, "%.0f");
-            ImGuiMCP::SetNextItemWidth(200.0f);
-            cvChanged |= ImGuiMCP::SliderFloat("Handheld sway##cvDr", &cv.drift, 0.0f, 3.0f, "%.1f");
-            if (cs.lastEvent[0]) ImGuiMCP::TextColored(grey, "Last: %s", cs.lastEvent);
-            if (cvChanged) {
-                ConvoCam::Clamp();
-                changed = true;
-            }
-        }
 
         if (changed) {
             AmbientCam::Clamp();
@@ -1402,7 +1570,7 @@ namespace FreeCamMenu {
         auto fl = [](float v) { return std::format("{:.4f}", v); };
         f << "; TFCam settings. TFCam created this file on first launch; it is not part of the download, so updating\n"
              "; TFCam never resets it. Delete it to return to the defaults. The in-game page (SKSE Menu Framework >\n"
-             "; FreeCam > Settings) saves every change here immediately.\n\n";
+             "; TFCam > Free camera and the other TFCam pages) saves every change here immediately.\n\n";
         f << "[FOV]\n; Degrees per mouse wheel tick\nfStep=" << fl(s_fovStep) << "\n"
           << "; 1 = the wheel eases the FOV in instead of jumping; fSmoothTime = seconds (0.02 .. 0.6)\nbSmooth="
           << (s_smoothFov ? 1 : 0) << "\nfSmoothTime=" << fl(s_fovSmoothTime) << "\n"
@@ -1444,7 +1612,7 @@ namespace FreeCamMenu {
           << "\n; seconds after the loading screen\nfStartDelay=" << fl(ce.startDelay)
           << "\nbKeysCancel=" << (ce.keysCancel ? 1 : 0) << "\n\n";
         const auto& sc = SceneCam::GetConfig();
-        f << "[SceneCam]\n; 0.10.0 Scene Camera (SKSE Menu Framework > FreeCam > Scene Camera). DX scan codes, 0 = unset.\n"
+        f << "[SceneCam]\n; 0.10.0 Scene Camera (SKSE Menu Framework > TFCam > Scene camera). DX scan codes, 0 = unset.\n"
           << "; Orbit on/off works anywhere; eye view and next partner only in your SexLab scene.\n"
           << "iSceneOrbitKey=" << sc.orbitKey << "\niSceneEyeKey=" << sc.eyeKey << "\niSceneEyeNextKey=" << sc.eyeNextKey
           << "\n; Saved shots: per scene stage (in your scene) or per pose (a pose SLUI started)\n"
@@ -1593,6 +1761,7 @@ namespace FreeCamMenu {
             a.dolly           = readInt("Idle", "bDolly", d.dolly ? 1 : 0) != 0;
             a.spiral          = readInt("Idle", "bSpiral", d.spiral ? 1 : 0) != 0;
             a.crossfade       = readFloat("Idle", "fCrossfade", d.crossfade);
+            a.routineSpeed    = readFloat("Idle", "fSpeed", d.routineSpeed);
             a.returnTime      = readFloat("Idle", "fReturnTime", d.returnTime);
             a.interiorScale   = readFloat("Idle", "fInteriorScale", d.interiorScale);
             a.dollyFraming    = readFloat("Idle", "fDollyFraming", d.dollyFraming);
@@ -1635,6 +1804,15 @@ namespace FreeCamMenu {
             c.swapSide        = readInt("Conversation", "bSwapSide", d.swapSide ? 1 : 0) != 0;
             c.drift           = readFloat("Conversation", "fDrift", d.drift);
             c.noEdgePan       = readInt("Conversation", "bNoEdgePan", d.noEdgePan ? 1 : 0) != 0;
+            c.tradeShot       = readInt("Conversation", "iTradeShot", d.tradeShot);
+            c.tradeDistance   = readFloat("Conversation", "fTradeDistance", d.tradeDistance);
+            c.tradeHeight     = readFloat("Conversation", "fTradeHeight", d.tradeHeight);
+            c.tradeSide       = readFloat("Conversation", "fTradeSide", d.tradeSide);
+            c.tradeTurn       = readFloat("Conversation", "fTradeTurn", d.tradeTurn);
+            c.tradeFov        = readFloat("Conversation", "fTradeFov", d.tradeFov);
+            c.tradeLive       = readInt("Conversation", "bTradeLive", d.tradeLive ? 1 : 0) != 0;
+            c.cutShots        = readInt("Conversation", "bCutShots", d.cutShots ? 1 : 0) != 0;
+            c.faceSpeaker     = readInt("Conversation", "bFaceSpeaker", d.faceSpeaker ? 1 : 0) != 0;
             ConvoCam::Clamp();
             SKSE::log::info("ConvoCam: conversation camera {} - {} shot, settle {:.1f} s, shot change {:.1f} s",
                 c.enabled ? "on" : "off", c.reverseKind == 1 ? "two-shot reverse" : "over-the-shoulder reverse", c.blendIn, c.shotSwitch);
@@ -1649,19 +1827,21 @@ namespace FreeCamMenu {
             b.inFreeFly = readInt("Blur", "bInFreeFly", bd.inFreeFly ? 1 : 0) != 0;
             b.style     = readInt("Blur", "iStyle", bd.style);
             b.sharp     = readFloat("Blur", "fSharpMiddle", bd.sharp);
+            b.keepSubject  = readInt("Blur", "bKeepSubjectSharp", bd.keepSubject ? 1 : 0) != 0;  // 11-13
+            b.subjectDepth = readFloat("Blur", "fSubjectDepth", bd.subjectDepth);
+            b.rampDepth    = readFloat("Blur", "fBlurRampDepth", bd.rampDepth);
             CamBlur::Clamp();
             auto&                  c = CamPath::Get();
             const CamPath::Settings cd{};
-            c.curved      = readInt("CameraPath", "bCurved", cd.curved ? 1 : 0) != 0;
-            c.snap        = readInt("CameraPath", "bCut", cd.snap ? 1 : 0) != 0;
-            c.duration    = readFloat("CameraPath", "fDuration", cd.duration);
-            c.loop        = readInt("CameraPath", "iLoop", cd.loop);
-            c.look        = readInt("CameraPath", "iLook", cd.look);
-            c.focus       = readInt("CameraPath", "iFocus", cd.focus);
-            c.focusHeight = readFloat("CameraPath", "fFocusHeight", cd.focusHeight);
-            c.followFocus = readInt("CameraPath", "bFollowFocus", cd.followFocus ? 1 : 0) != 0;
-            c.addKey      = readInt("CameraPath", "iAddPointKey", cd.addKey);
-            c.playKey     = readInt("CameraPath", "iPlayKey", cd.playKey);
+            c.openKey    = readInt("CameraPath", "iOpenWindowKey", cd.openKey);
+            c.addKey     = readInt("CameraPath", "iAddCameraKey", cd.addKey);
+            c.playKey    = readInt("CameraPath", "iPlayKey", cd.playKey);
+            c.recordKey  = readInt("CameraPath", "iRecordKey", cd.recordKey);
+            c.smoothness = readFloat("CameraPath", "fSmoothness", cd.smoothness);
+            c.aimHeight  = readFloat("CameraPath", "fAimHeight", cd.aimHeight);
+            c.showPath   = readInt("CameraPath", "bShowPath", cd.showPath ? 1 : 0) != 0;
+            c.prismaEditor = readInt("CameraPath", "bPrismaEditor", cd.prismaEditor ? 1 : 0) != 0;
+            c.sceneAutoPlay = readInt("CameraPath", "bSceneAutoPlay", cd.sceneAutoPlay ? 1 : 0) != 0;   // 11-14 round 13
             CamPath::Clamp();
             auto&                 af = FovFx::Get();  // 0.18.0
             const FovFx::Settings ad{};
@@ -1683,7 +1863,36 @@ namespace FreeCamMenu {
             af.aimBlur     = readInt("ActionFOV", "bArcherBlur", ad.aimBlur ? 1 : 0) != 0;
             af.aimVignette = readFloat("ActionFOV", "fArcherVignette", ad.aimVignette);
             AimDot::Get().enabled = readInt("AimDot", "bHitTheDot", AimDot::Settings{}.enabled ? 1 : 0) != 0;
+            AimDot::Get().hideGameCrosshair = readInt("AimDot", "bHideGameCrosshair", AimDot::Settings{}.hideGameCrosshair ? 1 : 0) != 0;
             FovFx::Clamp();
+            auto&                   xf = FrameFx::Get();  // 0.18.0
+            const FrameFx::Settings xd{};
+            xf.motionBlur = readInt("ImageFX", "iMotionBlur", xd.motionBlur);
+            xf.shutter    = readFloat("ImageFX", "fShutter", xd.shutter);
+            xf.maxBlur    = readFloat("ImageFX", "fLongestSmear", xd.maxBlur);
+            xf.zoomBlur   = readInt("ImageFX", "bZoomBlur", xd.zoomBlur ? 1 : 0) != 0;
+            xf.lens       = readInt("ImageFX", "iLens", xd.lens);
+            xf.distortion = readFloat("ImageFX", "fDistortion", xd.distortion);
+            xf.fringe     = readFloat("ImageFX", "fFringe", xd.fringe);
+            xf.vignette   = readFloat("ImageFX", "fVignette", xd.vignette);
+            xf.streaks    = readFloat("ImageFX", "fStreaks", xd.streaks);
+            xf.streakFrom = readFloat("ImageFX", "fStreakFrom", xd.streakFrom);
+            xf.bars       = readInt("ImageFX", "bCinemaBars", xd.bars ? 1 : 0) != 0;
+            FrameFx::Clamp();
+            auto&                        vf = VideoCapture::Get();
+            const VideoCapture::Settings vd{};
+            vf.height   = readInt("Video", "iHeight", vd.height);
+            vf.fps      = readInt("Video", "iFps", vd.fps);
+            vf.quality  = readInt("Video", "iQuality", vd.quality);
+            vf.audio    = readInt("Video", "bSound", vd.audio ? 1 : 0) != 0;
+            vf.withPath = readInt("Video", "bWithCameraPath", vd.withPath ? 1 : 0) != 0;
+            vf.key      = readInt("Video", "iKey", vd.key);
+            {   // 11-14 round 12: the video folder ("" = Data\Movies)
+                char folder[MAX_PATH] = {};
+                GetPrivateProfileStringA("Video", "sFolder", "", folder, sizeof(folder), ini);
+                VideoCapture::SetFolder(folder);
+            }
+            VideoCapture::Clamp();
             SKSE::log::info("FovFx: action FOV {}", af.enabled ? "on" : "off");
             SKSE::log::info("CamBlur: background blur {} ({}, strength {:.2f}, sharp middle {:.2f}{})", b.enabled ? "on" : "off",
                 b.style == CamBlur::kStyleEnb ? "ENB depth of field" : "edges", b.strength, b.sharp,
@@ -1795,6 +2004,7 @@ namespace FreeCamMenu {
     }
 
     static bool __stdcall OnSMFInput(RE::InputEvent* a_event) {
+        if (CamPathWindow::OnMenuInput(a_event)) return true;  // 0.18.0: the window's own key closes it
         if (!s_capturing.load()) return false;
 
         for (auto* evt = a_event; evt; evt = evt->next) {
@@ -1833,14 +2043,20 @@ namespace FreeCamMenu {
             return;
         }
 
-        SKSEMenuFramework::SetSection("FreeCam");
-        SKSEMenuFramework::AddSectionItem("Settings", RenderSettings);
-        SKSEMenuFramework::AddSectionItem("Cell Entry", RenderCellEntry);  // 0.9.0
-        SKSEMenuFramework::AddSectionItem("Scene Camera", RenderSceneCam);  // 0.10.0
-        SKSEMenuFramework::AddSectionItem("Idle & Furniture", RenderAmbient);  // 0.11.0
-        SKSEMenuFramework::AddSectionItem("Camera Path", RenderCamPath);       // 0.17.0
-        SKSEMenuFramework::AddSectionItem("Action FOV", RenderActionFov);      // 0.18.0
+        // After 0.19.0: the section is named after the mod (was "FreeCam"); ten pages, one subject each.
+        SKSEMenuFramework::SetSection("TFCam");
+        SKSEMenuFramework::AddSectionItem("Free camera", RenderSettings);
+        SKSEMenuFramework::AddSectionItem("Camera light", RenderLight);
+        SKSEMenuFramework::AddSectionItem("Walls", RenderWalls);
+        SKSEMenuFramework::AddSectionItem("Conversation camera", RenderConvo);
+        SKSEMenuFramework::AddSectionItem("Idle and furniture", RenderAmbient);
+        SKSEMenuFramework::AddSectionItem("Cell entry", RenderCellEntry);
+        SKSEMenuFramework::AddSectionItem("Scene camera", RenderSceneCam);
+        SKSEMenuFramework::AddSectionItem("Action FOV and archery", RenderActionFov);
+        SKSEMenuFramework::AddSectionItem("Camera path", RenderCamPath);
+        SKSEMenuFramework::AddSectionItem("Image and video", RenderImageVideo);
         SKSEMenuFramework::AddInputEvent(OnSMFInput);
+        CamPathWindow::Register();  // 0.18.0
 
         SKSE::log::info("FreeCamMenu: settings section registered");
     }

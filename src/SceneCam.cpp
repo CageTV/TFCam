@@ -160,7 +160,7 @@ namespace SceneCam {
         Pose ReadPose(const RE::FreeCameraState* a_fcs) {
             Pose p;
             p.pos   = a_fcs->translation;
-            p.pitch = a_fcs->rotation.x;
+            p.pitch = WrapPi(a_fcs->rotation.x);  // 0.17.1: the vanilla free camera keeps its pitch in 0..2 pi (looking up = ~6)
             p.yaw   = a_fcs->rotation.y;
             p.roll  = FreeCam::GetRollRadians();
             p.fov   = GetFOV();
@@ -503,7 +503,7 @@ namespace SceneCam {
             s.y      = Dot(v, fwd);
             s.z      = v.z;
             s.yawRel = WrapPi(a_p.yaw - a_c.heading) * kRadToDeg;
-            s.pitch  = a_p.pitch * kRadToDeg;
+            s.pitch  = WrapPi(a_p.pitch) * kRadToDeg;
             s.roll   = WrapPi(a_p.roll) * kRadToDeg;
             s.fov    = a_p.fov;
             s.label  = a_c.label;
@@ -527,7 +527,7 @@ namespace SceneCam {
             p.pos   = { a_c.anchor.x + right.x * local.x + fwd.x * local.y, a_c.anchor.y + right.y * local.x + fwd.y * local.y,
                   a_c.anchor.z + local.z };
             p.yaw   = WrapPi(a_c.heading + a_s.yawRel * kDegToRad);
-            p.pitch = std::clamp(a_s.pitch * kDegToRad, -kPitchLimit, kPitchLimit);
+            p.pitch = std::clamp(WrapPi(a_s.pitch * kDegToRad), -kPitchLimit, kPitchLimit);  // 0.17.1: wrap first (old shots)
             p.roll  = WrapPi(a_s.roll * kDegToRad);
             const auto& fs   = FreeCam::GetSettings();
             const float fLo  = std::clamp(fs.fovMin, 1.0f, 170.0f);
@@ -1646,7 +1646,7 @@ namespace SceneCam {
             const float rollGoal = WrapPi((s_cfg.orbitRoll + s_orbit.rollPhase) * kDegToRad);
             s_orbit.roll         = WrapPi(s_orbit.roll + WrapPi(rollGoal - s_orbit.roll) * ExpWeight(a_dt, kChaseHalfLife));
             FreeCam::SetExtraRoll(s_orbit.roll);
-            CamCollision::Request(s_orbit.target, "scene orbit");  // 0.12.0
+            CamCollision::Request(s_orbit.target, "scene orbit", true);  // 0.12.0; 11-17 + the real ground under the camera
         }
 
         // 0.15.0: the chosen view, chased round the smoothed scene centre.
@@ -1704,13 +1704,13 @@ namespace SceneCam {
             p.roll  = s_preset.roll;
             p.fov   = s_preset.fov;
             WritePose(a_fcs, p, true);
-            CamCollision::Request(centre, "scene preset");
+            CamCollision::Request(centre, "scene preset", s_preset.view != 0);  // 11-17: ground too, not for a saved shot
         }
 
         void DriveEye(RE::FreeCameraState* a_fcs, float a_prePitch, float a_preYaw, float a_dt) {
             // What the vanilla Update turned this frame is the user's mouse / stick look: keep it as an offset.
             s_eye.yawOff   = std::clamp(s_eye.yawOff + WrapPi(a_fcs->rotation.y - a_preYaw), -kLookLimit, kLookLimit);
-            s_eye.pitchOff = std::clamp(s_eye.pitchOff + (a_fcs->rotation.x - a_prePitch), -kLookLimit, kLookLimit);
+            s_eye.pitchOff = std::clamp(s_eye.pitchOff + WrapPi(a_fcs->rotation.x - a_prePitch), -kLookLimit, kLookLimit);
 
             auto       actor  = s_eye.target.get();
             const bool loaded = actor && actor->Get3D(false);
